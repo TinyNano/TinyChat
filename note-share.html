@@ -15,17 +15,17 @@
 <meta name="twitter:card" content="summary">
 <link rel="icon" type="image/svg+xml" href="./logo-icon.svg">
 <link rel="apple-touch-icon" href="./logo-icon.svg">
-<link rel="stylesheet" href="/static/css/style.min.css?v=2.0.164">
-<link rel="stylesheet" href="/vendor/highlight/github.min.css?v=2.0.164" id="hljs-theme">
-<link rel="stylesheet" href="/vendor/katex/katex.min.css?v=2.0.164">
-<link rel="stylesheet" href="/static/css/enhanced.min.css?v=2.0.164">
-<link rel="stylesheet" href="/static/css/refine.min.css?v=2.0.164">
-<link rel="stylesheet" href="/static/css/redesign.min.css?v=2.0.164">
-<link rel="stylesheet" href="/static/css/polish.min.css?v=2.0.164">
-<link rel="stylesheet" href="/static/css/markdown.min.css?v=2.0.164">
-<link rel="stylesheet" href="/static/css/chrome.min.css?v=2.0.164">
-<script src="/static/js/theme-boot.min.js?v=2.0.164"></script>
-<script src="/static/js/perf.min.js?v=2.0.164"></script>
+<link rel="stylesheet" href="/static/css/style.min.css?v=2.1.0">
+<link rel="stylesheet" href="/vendor/highlight/github.min.css?v=2.1.0" id="hljs-theme">
+<link rel="stylesheet" href="/vendor/katex/katex.min.css?v=2.1.0">
+<link rel="stylesheet" href="/static/css/enhanced.min.css?v=2.1.0">
+<link rel="stylesheet" href="/static/css/refine.min.css?v=2.1.0">
+<link rel="stylesheet" href="/static/css/redesign.min.css?v=2.1.0">
+<link rel="stylesheet" href="/static/css/polish.min.css?v=2.1.0">
+<link rel="stylesheet" href="/static/css/markdown.min.css?v=2.1.0">
+<link rel="stylesheet" href="/static/css/chrome.min.css?v=2.1.0">
+<script src="/static/js/theme-boot.min.js?v=2.1.0"></script>
+<script src="/static/js/perf.min.js?v=2.1.0"></script>
 <style>
   .note-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
   .note-tag { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: var(--bg-code, rgba(0,0,0,.05)); color: var(--text-secondary, #666); }
@@ -58,6 +58,19 @@
     border-radius: 0; padding: 2px 0 2px 13px; color: var(--text-secondary, #555);
   }
   .share-preview .msg.assistant .md-prose blockquote::before { display: none; }
+
+  /* 分享页留言(作者勾选「允许访客留言」后出现) */
+  .share-comments { margin-top: 22px; background: var(--bg-surface, #fff); border-radius: 12px; box-shadow: var(--shadow-sm); padding: 16px 20px; }
+  .share-cmt-title { font-size: 16px; margin: 0 0 10px; }
+  .share-cmt-item { padding: 9px 0; border-bottom: 1px solid var(--hairline, rgba(0,0,0,.06)); }
+  .share-cmt-item:last-child { border-bottom: 0; }
+  .share-cmt-text { font-size: 13.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+  .share-cmt-form { margin-top: 12px; display: grid; gap: 8px; }
+  .share-cmt-form input, .share-cmt-form textarea {
+    width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--hairline-strong, rgba(0,0,0,.12));
+    background: var(--bg-input, #fff); color: var(--text, #1d1d1f); font-size: 13.5px; resize: vertical;
+  }
+  .share-cmt-form .btn { justify-self: start; }
 </style>
 </head>
 <body class="share-page">
@@ -71,10 +84,10 @@
   <main class="share-main" id="note-root">
     <p class="muted">正在加载笔记…</p>
   </main>
-  <script defer src="/static/js/config.min.js?v=2.0.164"></script>
-  <script defer src="/static/js/icons.min.js?v=2.0.164"></script>
-  <script defer src="/static/js/renderer.min.js?v=2.0.164"></script>
-  <script defer src="/static/js/office-formula-copy.min.js?v=2.0.164"></script>
+  <script defer src="/static/js/config.min.js?v=2.1.0"></script>
+  <script defer src="/static/js/icons.min.js?v=2.1.0"></script>
+  <script defer src="/static/js/renderer.min.js?v=2.1.0"></script>
+  <script defer src="/static/js/office-formula-copy.min.js?v=2.1.0"></script>
   <script>
     (function () {
       const root = document.getElementById('note-root');
@@ -104,7 +117,7 @@
       const base = window.apiUrl ? window.apiUrl('') : '';
       function api(path) { return (window.apiUrl ? window.apiUrl(path) : path); }
 
-      function renderView(note) {
+      function renderView(note, share) {
         document.title = (note.title || '笔记分享') + ' · TinyChat';
         const ogTitle = document.querySelector('meta[property="og:title"]');
         if (ogTitle) ogTitle.setAttribute('content', document.title);
@@ -120,6 +133,18 @@
           + '<div class="msg assistant"><div class="msg-content" id="note-body"></div></div>'
           + '</div>';
         if (note.editable) html += '<div style="margin-top:14px"><button class="btn small" id="note-edit-btn">编辑笔记</button></div>';
+        // 分享页留言:作者勾选「允许访客留言」后,这里出现留言列表与发表框
+        if (share && share.allowComments) {
+          html += '<div class="share-comments" id="share-comments">'
+            + '<h2 class="share-cmt-title">留言 <span class="muted" id="share-cmt-count"></span></h2>'
+            + '<div id="share-cmt-list"></div>'
+            + '<div class="share-cmt-form">'
+            + '<input id="share-cmt-name" maxlength="40" placeholder="昵称(可留空)">'
+            + '<textarea id="share-cmt-text" maxlength="500" rows="2" placeholder="写下你的留言…"></textarea>'
+            + '<button class="btn small primary" id="share-cmt-send">发表留言</button>'
+            + '<span class="muted small" id="share-cmt-status"></span>'
+            + '</div></div>';
+        }
         root.innerHTML = html;
         const body = document.getElementById('note-body');
         if (window.OCRenderer) window.OCRenderer.renderInto(body, note.content || '');
@@ -127,6 +152,48 @@
         // 附件鉴权:关闭「分享仅包含正文」时服务端已把 share 令牌写进链接;
         // 否则正文里的附件引用会被替换为提示文字,不会发起无效请求。
         if (note.editable) document.getElementById('note-edit-btn').addEventListener('click', () => renderEditor(note));
+        if (share && share.allowComments) renderComments(share.comments || []);
+      }
+
+      function renderComments(items) {
+        const list = document.getElementById('share-cmt-list');
+        const count = document.getElementById('share-cmt-count');
+        if (!list) return;
+        if (count) count.textContent = items.length ? '(' + items.length + ')' : '';
+        if (!items.length) list.innerHTML = '<p class="muted small">还没有留言,来写下第一条吧。</p>';
+        else list.innerHTML = items.map((c) =>
+          '<div class="share-cmt-item"><div class="share-cmt-text">' + escapeHtml(c.text || '') + '</div>'
+          + '<div class="muted small">' + escapeHtml(c.name || '访客') + ' · ' + escapeHtml(fmtTime(c.t)) + '</div></div>'
+        ).join('');
+        const send = document.getElementById('share-cmt-send');
+        if (send && !send._bound) {
+          send._bound = true;
+          send.addEventListener('click', async () => {
+            const textEl = document.getElementById('share-cmt-text');
+            const nameEl = document.getElementById('share-cmt-name');
+            const status = document.getElementById('share-cmt-status');
+            const text = String((textEl && textEl.value) || '').trim();
+            if (!text) { status.textContent = '请填写留言内容'; return; }
+            send.disabled = true;
+            status.textContent = '发送中…';
+            try {
+              const r = await fetch(api('/api/notes/shared/' + token + '/comment'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text, name: String((nameEl && nameEl.value) || '').trim() }),
+              });
+              const data = await r.json().catch(() => ({}));
+              if (!r.ok) throw new Error((data.error && data.error.message) || '留言失败');
+              if (textEl) textEl.value = '';
+              status.textContent = '';
+              renderComments(data.comments || []);
+            } catch (e) {
+              status.textContent = e.message || '留言失败,请稍后再试';
+            } finally {
+              send.disabled = false;
+            }
+          });
+        }
       }
 
       function renderEditor(note) {
@@ -187,9 +254,9 @@
           .then(async (r) => {
             const data = await r.json().catch(() => ({}));
             if (!r.ok) throw new Error((data.error && data.error.message) || '分享不存在或已失效');
-            return data.note;
+            return data;
           })
-          .then((note) => whenReady(() => renderView(note)))
+          .then((data) => whenReady(() => renderView(data.note || {}, data)))
           .catch((e) => showError('无法打开笔记', e.message || '分享不存在或已失效'));
       }
       if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);

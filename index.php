@@ -60,6 +60,11 @@ try {
     // 首次写库失败时仍允许继续，具体接口会再报错
 }
 
+// 提醒类邮件队列(登录提醒/额度预警):挂到 shutdown 阶段投递 —— FPM 下先
+// fastcgi_finish_request 把响应交还给用户再发信,任何环境下都不会阻塞当前请求的响应;
+// 60 秒限频 + 每轮最多 2 封,SMTP 卡死也不影响站点。
+register_shutdown_function('tc_mailq_shutdown_drain');
+
 if ($path === '/api' || strpos($path, '/api/') === 0 || $path === '/v1' || strpos($path, '/v1/') === 0) {
     try {
         tc_dispatch($method, $path);
@@ -151,6 +156,24 @@ function tc_dispatch($method, $path) {
         array('POST', '#^/api/setup$#', 'tc_api_setup'),
         array('POST', '#^/api/auth/register$#', 'tc_api_register'),
         array('POST', '#^/api/auth/login$#', 'tc_api_login'),
+        // 两步验证第二步:凭登录票据 + TOTP 验证码换正式会话令牌
+        array('POST', '#^/api/auth/mfa$#', 'tc_api_auth_mfa'),
+        // 跨对话记忆:列表 / 手动添加 / 自动提取入库 / 单条删除 / 清空
+        array('GET', '#^/api/memories$#', 'tc_api_memories_list'),
+        array('POST', '#^/api/memories$#', 'tc_api_memories_add'),
+        array('POST', '#^/api/memories/auto$#', 'tc_api_memories_auto'),
+        array('DELETE', '#^/api/memories$#', 'tc_api_memories_clear'),
+        array('DELETE', '#^/api/memories/([^/]+)$#', 'tc_api_memories_delete'),
+        // 消息收藏夹:列表 / 收藏(幂等开关) / 删除
+        array('GET', '#^/api/favorites$#', 'tc_api_favorites_list'),
+        array('POST', '#^/api/favorites$#', 'tc_api_favorites_toggle'),
+        array('DELETE', '#^/api/favorites/([^/]+)$#', 'tc_api_favorites_delete'),
+        // TOTP 两步验证:生成绑定密钥 / 确认开启 / 关闭
+        array('POST', '#^/api/me/totp/setup$#', 'tc_api_me_totp_setup'),
+        array('POST', '#^/api/me/totp/enable$#', 'tc_api_me_totp_enable'),
+        array('POST', '#^/api/me/totp/disable$#', 'tc_api_me_totp_disable'),
+        // 每日摘要(惰性聚合,前端每天首次加载拉一次)
+        array('GET', '#^/api/me/digest$#', 'tc_api_me_digest'),
         array('POST', '#^/api/auth/guest$#', 'tc_api_guest_login'),
         array('POST', '#^/api/auth/oauth/exchange$#', 'tc_api_oauth_exchange'),
         array('POST', '#^/api/auth/oauth/bind-ticket$#', 'tc_api_oauth_bind_ticket'),
@@ -209,6 +232,13 @@ function tc_dispatch($method, $path) {
         array('DELETE', '#^/api/notes/share$#', 'tc_api_note_share_close'),
         array('GET', '#^/api/notes/shared/([A-Za-z0-9]+)$#', 'tc_api_note_shared_get'),
         array('POST', '#^/api/notes/shared/([A-Za-z0-9]+)$#', 'tc_api_note_shared_edit'),
+        // 分享页留言:访客按 token 留言;属主查看与清空
+        array('POST', '#^/api/notes/shared/([A-Za-z0-9]+)/comment$#', 'tc_api_note_shared_comment'),
+        array('GET', '#^/api/notes/share/comments$#', 'tc_api_note_share_comments'),
+        array('DELETE', '#^/api/notes/share/comments$#', 'tc_api_note_share_comments'),
+        // 笔记云端版本历史:推送快照 / 取快照列表
+        array('POST', '#^/api/notes/versions$#', 'tc_api_note_versions_push'),
+        array('GET', '#^/api/notes/versions$#', 'tc_api_note_versions_list'),
         // 在线聊天(IM):好友 / 单聊 / 群聊 / 附件 / AI 召唤(handler 在 lib/im.php)
         array('GET', '#^/api/im/users/search$#', 'tc_api_im_user_search'),
         array('GET', '#^/api/friends$#', 'tc_api_friends_list'),

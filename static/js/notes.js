@@ -2601,6 +2601,15 @@
         localStorage.setItem(verKey(noteId), JSON.stringify(half));
       } catch (e2) { /* 放弃记录历史,不影响正文保存 */ }
     }
+    // 云端留档:换设备/清浏览器后仍可回溯。服务端自己做去重/合并/裁剪,
+    // 这里 fire-and-forget,失败不影响本地保存节奏。
+    if (N.userId) {
+      apiFetch('/api/notes/versions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ noteId, content, updatedAt: now }),
+      }).catch(() => {});
+    }
   }
   function openVersionHistory(n) {
     const list = readVersions(n.id).slice().reverse();
@@ -2617,7 +2626,9 @@
             + '<div class="ver-item"><span class="ver-time">' + esc(fmtFull(v.at)) + '</span>'
             + '<span class="ver-len">' + v.len + ' 字符</span>'
             + '<button class="btn small" data-ver="' + i + '">预览并恢复</button></div>').join('') + '</div>'
-        : '<p class="muted small">还没有历史版本。编辑保存后会自动留档（本机保留，最多 ' + VER_KEEP + ' 个）。</p>')
+        : '<p class="muted small">还没有本机历史版本。编辑保存后会自动留档（本机保留，最多 ' + VER_KEEP + ' 个）。</p>')
+      + '<div class="section-title" style="margin-top:14px">云端版本</div>'
+      + '<div id="notes-cloud-versions"><p class="muted small">加载中…</p></div>'
       + '</div>'
       + '<div class="modal-footer"><button class="btn" data-close>关闭</button></div>'
       + '</div>';
@@ -2626,6 +2637,42 @@
     mask._onClose = done;
     mask.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', done));
     mask.addEventListener('mousedown', (e) => { if (e.target === mask) done(); });
+    // 云端版本:登录后 pushVersion 会同步一份到服务端(ntv:{uid}),换设备也能恢复
+    (async () => {
+      const box = mask.querySelector('#notes-cloud-versions');
+      if (!box) return;
+      if (!N.userId) { box.innerHTML = '<p class="muted small">登录后编辑的版本会同步到云端。</p>'; return; }
+      try {
+        const r = await apiFetch('/api/notes/versions?noteId=' + encodeURIComponent(n.id));
+        const d = await r.json().catch(() => ({}));
+        const items = (d.items || []).slice().reverse();
+        if (!items.length) { box.innerHTML = '<p class="muted small">云端还没有这个笔记的版本。编辑保存后会自动留档（每笔记最多 5 份）。</p>'; return; }
+        box.innerHTML = '<div class="ver-list">' + items.map((v, i) => ''
+          + '<div class="ver-item"><span class="ver-time">' + esc(fmtFull(v.t)) + '</span>'
+          + '<span class="ver-len">' + (v.content || '').length + ' 字符</span>'
+          + '<button class="btn small" data-cver="' + i + '">恢复</button></div>').join('') + '</div>';
+        box.querySelectorAll('[data-cver]').forEach((b) => {
+          b.addEventListener('click', async () => {
+            const v = items[Number(b.dataset.cver)];
+            const ok = await window.OCUI.confirm({
+              title: '恢复到 ' + fmtFull(v.t) + ' 的云端版本？',
+              message: '当前内容会被替换（可 Ctrl+Z 撤销）。',
+              confirmText: '恢复',
+            });
+            if (!ok) return;
+            const cur = noteById(n.id);
+            if (!cur) return;
+            pushVersion(n.id, cur.content || '', cur.title || '');
+            updateNote(n.id, { content: v.content || '' });
+            saveEditorSoon(n.id);
+            done();
+            toast('已恢复云端版本');
+          });
+        });
+      } catch (e) {
+        box.innerHTML = '<p class="muted small">云端版本加载失败,请稍后重试。</p>';
+      }
+    })();
     mask.querySelectorAll('[data-ver]').forEach((b) => {
       b.addEventListener('click', async () => {
         const v = list[Number(b.dataset.ver)];
@@ -2643,6 +2690,56 @@
         done();
         toast('已恢复历史版本');
       });
+    });
+    if (window.OCUI) window.OCUI.openModal(mask);
+    else mask.classList.add('show');
+  }
+
+  // 分享页留言:属主查看与清空(留言由 /n/<token> 访客写下,存在分享记录里)
+  async function openShareComments(noteId) {
+    const n = noteById(noteId);
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask notes-ver-mask hidden';
+    mask.innerHTML =
+      '<div class="modal notes-ver-modal" role="dialog" aria-modal="true">'
+      + '<div class="modal-header"><h3>' + icon('chat', 15) + ' 分享页留言 — ' + esc(n ? (n.title || '无标题') : '') + '</h3>'
+      + '<button class="notes-icon-btn" data-close>' + icon('close', 15) + '</button></div>'
+      + '<div class="modal-body"><div id="ns-cmt-list"><p class="muted small">加载中…</p></div></div>'
+      + '<div class="modal-footer">'
+      + '<button class="btn danger" id="ns-cmt-clear">清空留言</button>'
+      + '<button class="btn" data-close>关闭</button>'
+      + '</div></div>';
+    document.body.appendChild(mask);
+    const done = () => { window.OCUI.closeModal(mask); setTimeout(() => mask.remove(), 340); };
+    mask._onClose = done;
+    mask.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', done));
+    mask.addEventListener('mousedown', (e) => { if (e.target === mask) done(); });
+    const box = mask.querySelector('#ns-cmt-list');
+    const render = (items, allow) => {
+      if (!allow) { box.innerHTML = '<p class="muted small">这篇笔记的分享未开启「允许访客留言」。在「修改设置」里勾选即可。</p>'; return; }
+      if (!items.length) { box.innerHTML = '<p class="muted small">还没有留言。</p>'; return; }
+      box.innerHTML = items.map((c) =>
+        '<div class="ver-item" style="align-items:flex-start"><div style="min-width:0;flex:1">'
+        + '<div style="word-break:break-all">' + esc(c.text || '') + '</div>'
+        + '<span class="muted small">' + esc(c.name || '访客') + ' · ' + esc(fmtFull(c.t)) + '</span></div></div>'
+      ).join('');
+    };
+    try {
+      const r = await apiFetch('/api/notes/share/comments?noteId=' + encodeURIComponent(noteId));
+      const d = await r.json().catch(() => ({}));
+      render(d.comments || [], !!d.allowComments);
+    } catch (e) {
+      box.innerHTML = '<p class="muted small">加载失败,请稍后重试。</p>';
+    }
+    mask.querySelector('#ns-cmt-clear').addEventListener('click', async () => {
+      const ok = await window.OCUI.confirm({ title: '清空留言', message: '确认清空这篇笔记分享页的全部留言？', danger: true, confirmText: '清空' });
+      if (!ok) return;
+      try {
+        const r = await apiFetch('/api/notes/share/comments?noteId=' + encodeURIComponent(noteId), { method: 'DELETE' });
+        if (!r.ok) throw new Error('清空失败');
+        render([], true);
+        toast('已清空');
+      } catch (e) { toast(e.message || '清空失败', true); }
     });
     if (window.OCUI) window.OCUI.openModal(mask);
     else mask.classList.add('show');
@@ -2679,6 +2776,7 @@
           + '<div class="shm-ops">'
           + '<button class="btn small" data-act="copy">复制链接</button>'
           + '<button class="btn small" data-act="edit"' + (n ? '' : ' disabled') + '>修改设置</button>'
+          + '<button class="btn small" data-act="comments">留言</button>'
           + '<button class="btn small danger" data-act="close">取消分享</button>'
           + '</div></div>';
       }).join('') + '</div>';
@@ -2718,6 +2816,9 @@
         item.querySelector('[data-act="edit"]').addEventListener('click', () => {
           if (!sh) return;
           openShareSettings(sh, noteId, refresh);
+        });
+        item.querySelector('[data-act="comments"]').addEventListener('click', () => {
+          openShareComments(noteId);
         });
         item.querySelector('[data-act="close"]').addEventListener('click', async () => {
           const n = noteById(noteId);
@@ -3146,6 +3247,8 @@
       + '<option value="30">30 天</option>'
       + '<option value="90">90 天</option>'
       + '</select></label>'
+      + '<div class="ns-expire"><span class="ns-expire-label">分享页留言</span>'
+      + '<label style="display:inline-flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="ns-comments"' + (s && s.allowComments ? ' checked' : '') + '> 允许访客留言（留言仅你和访客可见）</label></div>'
       + '<p class="ns-hint" id="ns-hint">' + (s ? '链接实时显示笔记最新内容;重新生成会使旧链接立即失效。' : '开启后可随时关闭或重新生成链接。') + '</p>'
       + '</div>'
       + '<div class="modal-footer">'
@@ -3199,8 +3302,9 @@
       applyBtn.disabled = true;
       try {
         const expireDays = Number((mask.querySelector('#ns-expire') || {}).value || 0);
+        const allowComments = !!(mask.querySelector('#ns-comments') || {}).checked;
         {
-          const r = await apiFetch('/api/notes/share', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ noteId, mode, expireDays }) });
+          const r = await apiFetch('/api/notes/share', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ noteId, mode, expireDays, allowComments, keepToken: 1 }) });
           const data = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error((data.error && data.error.message) || '生成分享链接失败');
           const share = data.share;
@@ -3222,7 +3326,8 @@
       regenBtn.disabled = true;
       try {
         const mode = currentMode() === 'private' ? 'view-link' : currentMode();
-        const r = await apiFetch('/api/notes/share', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ noteId, mode }) });
+        const allowComments = !!(mask.querySelector('#ns-comments') || {}).checked;
+        const r = await apiFetch('/api/notes/share', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ noteId, mode, allowComments }) });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error((data.error && data.error.message) || '重新生成失败');
         const share = data.share;

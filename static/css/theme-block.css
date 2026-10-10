@@ -664,3 +664,90 @@ html[data-oc-theme="block"] ::-webkit-scrollbar-thumb:hover {
   html[data-oc-theme="block"] .msg.assistant .md-prose .table-wrap table th,
   html[data-oc-theme="block"] .msg.assistant .md-prose .table-wrap table td { padding: 9px 11px !important; }
 }
+
+/* ---------- 18. Apple 官网化:字体 / 毛玻璃导航 / 胶囊按钮 / 大标题排版 ----------
+ * 在原有三条立论(圆角矩形分块 / 不画线 / 大圆角)之上,向 apple.com 的观感再推三步:
+ *   A) SF 风格字体栈与抗锯齿排版;
+ *   B) 侧栏与输入区改用「饱和度提升 + 高斯模糊」的半透明材质(官网导航栏同款),
+ *      不改任何被测试钉住的底色断言(画布/卡片/气泡仍是 #f5f5f7 / #fff / #e8e8ed);
+ *   C) 按钮全部胶囊化(980px 圆角)、空态大标题用产品页级的字号与字距。
+ * 全部选择器仍带 html[data-oc-theme="block"] 前缀;几何断言(20px 卡片圆角、窄屏
+ * 10px 内边距、无边线)原样保留。 */
+
+/* A. SF 风格字体栈:Mac 上直接命中系统字体,Windows 回落雅黑,iOS 回落苹方 */
+html[data-oc-theme="block"] body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro SC", "PingFang SC",
+    "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* B. 半透明材质:侧栏与输入区(官网导航的 saturate+blur 配方) */
+html[data-oc-theme="block"] .sidebar {
+  background: rgba(245, 245, 247, 0.8);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+html[data-oc-theme="block"][data-theme="dark"] .sidebar {
+  background: rgba(18, 18, 20, 0.78);
+}
+html[data-oc-theme="block"] .composer {
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+}
+html[data-oc-theme="block"][data-theme="dark"] .composer {
+  background: rgba(28, 28, 30, 0.9);
+}
+/* 弹窗与下拉菜单同材质:浮起层统一质感 */
+html[data-oc-theme="block"] .modal,
+html[data-oc-theme="block"] .oc-menu,
+html[data-oc-theme="block"] .user-menu {
+  backdrop-filter: saturate(180%) blur(24px);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+}
+html[data-oc-theme="block"] .modal { background: rgba(255, 255, 255, 0.96); }
+html[data-oc-theme="block"][data-theme="dark"] .modal { background: rgba(28, 28, 30, 0.96); }
+
+/* C. 胶囊按钮 + 顺滑的按压/悬停反馈(官网 CTA 的 980px 圆角) */
+html[data-oc-theme="block"] .btn {
+  border-radius: 980px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease, opacity 0.18s ease;
+}
+html[data-oc-theme="block"] .btn:active { transform: scale(0.97); }
+html[data-oc-theme="block"] .new-chat-btn,
+html[data-oc-theme="block"] .assistant-lib-btn,
+html[data-oc-theme="block"] .sidebar-model-wrap .model-picker {
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+html[data-oc-theme="block"] .new-chat-btn:active,
+html[data-oc-theme="block"] .assistant-lib-btn:active,
+html[data-oc-theme="block"] .sidebar-model-wrap .model-picker:active { transform: scale(0.985); }
+
+/* D. 大标题排版:产品页级字号与字距(仅桌面;窄屏沿用 17 节的收窄档) */
+@media (min-width: 769px) {
+  html[data-oc-theme="block"] #empty-title {
+    font-size: clamp(2.1rem, 3.2vw, 3.1rem) !important;
+    font-weight: 700;
+    letter-spacing: -0.032em;
+    line-height: 1.08;
+  }
+}
+html[data-oc-theme="block"] .empty-lead {
+  color: var(--text-secondary);
+  letter-spacing: -0.01em;
+}
+html[data-oc-theme="block"] .empty-suggest { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+html[data-oc-theme="block"] .empty-suggest:hover { transform: translateY(-2px); }
+
+/* E. 侧栏品牌区:官网页眉的字重与字距 */
+html[data-oc-theme="block"] .sidebar-brand {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+/* 消息卡投影再柔一档:官网卡片的阴影几乎不可见,靠色阶而非投影分区 */
+html[data-oc-theme="block"] .msg.assistant .msg-content { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04); }
+html[data-oc-theme="block"][data-theme="dark"] .msg.assistant .msg-content { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4); }

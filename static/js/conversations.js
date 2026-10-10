@@ -48,6 +48,7 @@
       { value: 'rename', label: '重命名' },
       { value: 'share', label: '分享对话', sub: '生成公开链接' },
       { value: 'branch', label: '创建分支', sub: '复制全部消息' },
+      { value: 'export', label: '导出 Markdown', sub: '保存为 .md 文件' },
       { value: 'del', label: '删除', sub: '不可恢复' },
     ];
     if (!window.OC || !window.OC.openSelect) return;
@@ -58,6 +59,7 @@
         else if (value === 'rename' && opts.onRename) opts.onRename(c, item);
         else if (value === 'share' && opts.onShare) opts.onShare(c);
         else if (value === 'branch' && opts.onBranch) opts.onBranch(c);
+        else if (value === 'export' && opts.onExport) opts.onExport(c);
         else if (value === 'del' && opts.onDelete) opts.onDelete(c);
       },
     });
@@ -316,10 +318,11 @@
   };
 
   // ============ 键盘快捷键 ============
+  // Ctrl/⌘+K 搜索会话 · Ctrl/⌘+Shift+O 新会话 · Ctrl/⌘+L 聚焦输入框 ·
+  // Ctrl/⌘+P 开关侧栏 · Ctrl/⌘+Enter 发送 · ?(非输入态) 呼出快捷键速查
   C.initShortcuts = function (handlers) {
     document.addEventListener('keydown', (e) => {
       const mod = e.metaKey || e.ctrlKey;
-      if (!mod) return;
       // 弹窗打开时不劫持快捷键:避免后台新建会话/切换侧栏等动作穿透到弹窗之下的页面
       if (window.OCUI && typeof window.OCUI.isModalOpen === 'function' && window.OCUI.isModalOpen()) return;
       const k = e.key.toLowerCase();
@@ -327,18 +330,27 @@
       const target = e.target;
       const inInput = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
 
-      if (k === 'k' && !inInput) {
+      if (mod && e.shiftKey && k === 'o' && !inInput) {
         e.preventDefault();
         if (handlers.onNewChat) handlers.onNewChat();
-      } else if (k === 'l') {
+      } else if (mod && k === 'k' && !inInput) {
+        e.preventDefault();
+        if (handlers.onFocusSearch) handlers.onFocusSearch();
+      } else if (mod && k === 'l') {
         e.preventDefault();
         if (handlers.onFocusInput) handlers.onFocusInput();
-      } else if (k === 'p' && !inInput) {
+      } else if (mod && k === 'p' && !inInput) {
         e.preventDefault();
         if (handlers.onToggleSidebar) handlers.onToggleSidebar();
-      } else if (k === 'enter' && inInput) {
+      } else if (mod && k === 'enter' && inInput) {
         // Cmd/Ctrl+Enter 发送（输入框内）
         if (handlers.onSend) handlers.onSend();
+      } else if (!mod && !inInput && e.key === '?') {
+        e.preventDefault();
+        if (handlers.onShortcuts) handlers.onShortcuts();
+      } else if (mod && k === ',' && !inInput) {
+        e.preventDefault();
+        if (handlers.onOpenSettings) handlers.onOpenSettings();
       }
     });
   };

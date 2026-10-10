@@ -81,6 +81,20 @@ async function submitAuth(api, name, password, btn, label, email, extra) {
       showError('注册成功，请查收验证邮件并完成邮箱验证后登录');
       return;
     }
+    // 两步验证:响应不带 token 而带一张 5 分钟票据,弹验证码输入框换正式令牌
+    if (data.mfa === 'totp' && data.ticket) {
+      setBusy(btn, false, label);
+      if (window.OCUI && window.OCUI.totpGate) {
+        window.OCUI.totpGate(data.ticket, (d2) => {
+          localStorage.setItem(cacheKey, d2.token);
+          localStorage.setItem('oc_user', JSON.stringify(d2.user || {}));
+          location.href = apiUrl('/');
+        });
+      } else {
+        showError('该账号已开启两步验证，但页面组件加载不完整，请刷新重试');
+      }
+      return;
+    }
     localStorage.setItem(cacheKey, data.token);
     localStorage.setItem('oc_user', JSON.stringify(data.user));
     location.href = apiUrl('/');
@@ -151,6 +165,16 @@ if (!verifyToken && !resetToken && localStorage.getItem(cacheKey)) {
 }
 
 fetch(apiUrl('/api/config')).then((r) => r.json()).then((cfg) => {
+  // 站点默认主题:本地从未自选过主题包时应用管理员设置的默认主题(不落盘)
+  try {
+    const pack = String((cfg && cfg.defaultThemePack) || 'default');
+    let raw = null;
+    try { raw = JSON.parse(localStorage.getItem('oc_prefs') || 'null'); } catch (e) { raw = null; }
+    const chosen = raw && typeof raw === 'object' && raw.themePack !== undefined && raw.themePack !== null && raw.themePack !== '';
+    if (!chosen && pack !== 'default' && window.OCUI && window.OCUI.applyThemePack) {
+      window.OCUI.applyThemePack(pack, { persist: false });
+    }
+  } catch (e) { /* 保持默认外观 */ }
   // 找回密码依赖邮件功能:开关关闭或未配置 SMTP 时,前台不展示"忘记密码"入口
   if (cfg && (cfg.passwordResetEnabled === false || cfg.mailReady === false)) {
     const forgotLink = $('show-forgot');

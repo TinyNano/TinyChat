@@ -1195,6 +1195,11 @@ function tc_api_public_config($db) {
         'agreementEnabled' => !empty($s['agreementEnabled']),
         // 账号注销模式:off=不开放, soft=软注销(改名+标记,原用户名/邮箱可重新注册), hard=删除全部数据
         'accountDeletionMode' => isset($s['accountDeletionMode']) ? (string) $s['accountDeletionMode'] : 'soft',
+        // 站点默认主题:新用户/未自选主题的用户应用哪套主题包(用户自选优先于此值)
+        'defaultThemePack' => isset($s['defaultThemePack']) ? (string) $s['defaultThemePack'] : 'default',
+        // 跨对话记忆 / 两步验证:前台据此显示或隐藏对应设置区块
+        'memoryEnabled' => !array_key_exists('memoryEnabled', $s) || !empty($s['memoryEnabled']),
+        'totpEnabled' => !array_key_exists('totpEnabled', $s) || !empty($s['totpEnabled']),
         // 演示模式:管理员的改动会在有效期后自动还原,前台据此提示
         'demoMode' => !empty($s['demoMode']),
         'demoExpireMinutes' => isset($s['demoExpireMinutes']) ? (int) $s['demoExpireMinutes'] : 10,
@@ -1261,8 +1266,14 @@ function tc_api_setup() {
     });
 }
 
-function tc_render_mail_template($settings, $kind, $name, $link, $expiresText = '24 小时') {
-    $tpl = $settings['mailTemplates'] ?? array(); $subject = $kind === 'reset' ? ($tpl['resetSubject'] ?? '重置密码') : ($tpl['verifySubject'] ?? '验证邮箱'); $html = $kind === 'reset' ? ($tpl['resetHtml'] ?? '') : ($tpl['verifyHtml'] ?? ''); $vars = array('{siteName}' => $settings['siteName'] ?? 'TinyChat', '{name}' => $name, '{link}' => $link, '{expires}' => $expiresText); return array(strtr($subject, $vars), strtr($html, $vars));
+function tc_render_mail_template($settings, $kind, $name, $link, $expiresText = '24 小时', $extraVars = array()) {
+    $tpl = $settings['mailTemplates'] ?? array();
+    if ($kind === 'loginAlert') { $subject = $tpl['loginAlertSubject'] ?? '{siteName} 账号在新设备登录'; $html = $tpl['loginAlertHtml'] ?? ''; }
+    elseif ($kind === 'reset') { $subject = $tpl['resetSubject'] ?? '重置密码'; $html = $tpl['resetHtml'] ?? ''; }
+    else { $subject = $tpl['verifySubject'] ?? '验证邮箱'; $html = $tpl['verifyHtml'] ?? ''; }
+    $vars = array('{siteName}' => $settings['siteName'] ?? 'TinyChat', '{name}' => $name, '{link}' => $link, '{expires}' => $expiresText);
+    foreach ((array) $extraVars as $k => $v) { $vars['{' . $k . '}'] = (string) $v; }
+    return array(strtr($subject, $vars), strtr($html, $vars));
 }
 
 function tc_api_register() {
@@ -1347,6 +1358,14 @@ function tc_api_login() {
         // 邮箱验证只约束「有邮箱且未验证」的用户;管理员代建的无邮箱账号不存在可验证的邮箱,
         // 若被此检查拦截将永远无法登录(历史版本创建的账号没有 emailVerifiedAt 字段)
         if (!empty($db['settings']['emailVerificationEnabled']) && empty($found['emailVerifiedAt']) && !empty($found['email'])) tc_fail(403, '请先验证邮箱后再登录');
+        // 两步验证:密码正确但不直接发 token,改发一张 5 分钟有效的中间票据,
+        // 前端引导输入验证码后由 POST /api/auth/mfa 换正式 token。票据不含 tv/ep,
+        // 无法当会话令牌用;尝试次数复用登录失败锁,防爆破。
+        if (!empty($found['totpSecret'])) {
+            $ticket = tc_jwt_sign(array('sub' => $found['id'], 'mfa' => 1, 'exp' => tc_now() + 5 * 60 * 1000));
+            tc_log_auth_event('auth', $found['name'], '密码校验通过，等待两步验证', $found['id']);
+            tc_json(200, array('mfa' => 'totp', 'ticket' => $ticket, 'name' => $found['name']));
+        }
         $user = $found;
         $settings = $db['settings'];
     });
@@ -1354,9 +1373,19 @@ function tc_api_login() {
     $seenId = $user['id'];
     tc_with_db(true, function (&$db) use ($seenId, &$user, &$settings) {
         tc_touch_user($db, $seenId);
-        foreach ($db['users'] as $u) {
-            if ($u['id'] === $seenId) { $user = $u; break; }
+        // 新设备登录提醒:UA 指纹与上次不同且开关开启时,往邮件队列塞一封提醒
+        // (同指纹的重复登录、指纹为空的 UA、无邮箱用户都不提醒)
+        foreach ($db['users'] as &$uu) {
+            if ((string) $uu['id'] !== (string) $seenId) continue;
+            $fp = tc_login_fingerprint();
+            $alert = !empty($db['settings']['loginAlertEnabled'])
+                && isset($uu['lastLoginFp']) && (string) $uu['lastLoginFp'] !== '' && (string) $uu['lastLoginFp'] !== $fp;
+            $uu['lastLoginFp'] = $fp;
+            if ($alert) tc_queue_login_alert($db, $uu);
+            $user = $uu;
+            break;
         }
+        unset($uu);
         $settings = $db['settings'];
     });
     tc_log_auth_event('auth', isset($user['name']) ? $user['name'] : '', '登录成功', $seenId);
@@ -1368,6 +1397,353 @@ function tc_log_auth_event($kind, $userName, $action, $userId = '') {
     $entry = array('kind' => $kind, 'userName' => (string) $userName, 'action' => (string) $action, 'ip' => tc_client_ip());
     if ($userId !== '') $entry['userId'] = (string) $userId;
     tc_push_log($entry);
+}
+
+// 登录设备指纹:取 UA 哈希。不追求唯一性,只求「同一台常用设备的浏览器短期稳定」,
+// 足够实现「新设备提醒」;改 UA / 换浏览器会触发提醒,属于预期行为。
+function tc_login_fingerprint() {
+    $ua = isset($_SERVER['HTTP_USER_AGENT']) ? (string) $_SERVER['HTTP_USER_AGENT'] : '';
+    if (trim($ua) === '') return '';
+    return hash('sha256', $ua);
+}
+
+// 新设备登录提醒邮件:入队(事务外投递),无邮箱用户静默跳过
+function tc_queue_login_alert(&$db, $u) {
+    $email = trim((string) (isset($u['email']) ? $u['email'] : ''));
+    if ($email === '' || strpos($email, '@') === false) return;
+    $tz = @date_default_timezone_get();
+    $time = $tz ? date('Y-m-d H:i:s') . ' (' . $tz . ')' : date('Y-m-d H:i:s');
+    $device = (string) (isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '未知设备');
+    if (function_exists('mb_substr')) $device = mb_substr($device, 0, 160, 'UTF-8');
+    else $device = substr($device, 0, 160);
+    $ip = tc_client_ip();
+    [$subject, $html] = tc_render_mail_template($db['settings'], 'loginAlert', (string) (isset($u['name']) ? $u['name'] : ''), '', '', array(
+        'time' => $time, 'device' => $device, 'ip' => $ip !== '' ? $ip : '未知',
+    ));
+    tc_mailq_enqueue($email, $subject, $html);
+}
+
+// 两步验证的第二步:凭 5 分钟中间票据 + TOTP 验证码换正式会话令牌。
+// 验证码错误走同一套登录失败锁(连错 N 次锁账号一段时间),票据本身不消耗、5 分钟自然过期。
+function tc_api_auth_mfa() {
+    $b = tc_read_json_body();
+    $ticket = trim((string) (isset($b['ticket']) ? $b['ticket'] : ''));
+    $code = trim((string) (isset($b['code']) ? $b['code'] : ''));
+    if ($ticket === '' || $code === '') tc_fail(400, '请输入验证器上的 6 位验证码');
+    $payload = tc_jwt_verify($ticket);
+    if (!$payload || empty($payload['mfa']) || empty($payload['sub'])) tc_fail(401, '验证已过期，请重新登录');
+    $seenId = (string) $payload['sub'];
+    tc_with_db(true, function (&$db) use ($seenId, $code) {
+        $found = null;
+        foreach ($db['users'] as $u) {
+            if ((string) $u['id'] === $seenId) { $found = $u; break; }
+        }
+        if (!$found) tc_fail(401, '验证已过期，请重新登录');
+        $locked = tc_check_login_lock($db['settings'], $found['name']);
+        if ($locked) tc_fail(429, '尝试次数过多，请 ' . $locked . ' 秒后重试');
+        if (empty($found['totpSecret'])) tc_fail(400, '该账号未开启两步验证，请直接用密码登录');
+        if (!tc_totp_verify($found['totpSecret'], $code)) {
+            tc_note_login_fail($db['settings'], $found['name']);
+            tc_log_auth_event('auth', $found['name'], '两步验证码错误', $found['id']);
+            tc_fail(401, '验证码不正确或已过期');
+        }
+        tc_clear_login_fail($found['name']);
+        tc_touch_user($db, $found['id']);
+        tc_log_auth_event('auth', $found['name'], '两步验证通过', $found['id']);
+        tc_json(200, array('token' => tc_issue_token($found, $db['settings']), 'user' => tc_sanitize_user($found)));
+    });
+}
+
+// ============================================================
+// 跨对话记忆:列表 / 手动增改 / 自动批量提取入库 / 单条删除 / 清空。
+// 自动提取由前端在对话结束后用当前模型完成(计费走对话通道),服务端只负责
+// 去重、裁剪与注入 —— 服务端不发起上游调用,不占写事务。
+// ============================================================
+
+function tc_memories_public($items) {
+    $out = array();
+    foreach ((array) $items as $it) {
+        if (!is_array($it) || !isset($it['id'])) continue;
+        $out[] = array(
+            'id' => (string) $it['id'],
+            'content' => (string) (isset($it['content']) ? $it['content'] : ''),
+            'createdAt' => (int) (isset($it['createdAt']) ? $it['createdAt'] : 0),
+            'source' => (string) (isset($it['source']) ? $it['source'] : 'manual'),
+        );
+    }
+    return $out;
+}
+
+// 单条记忆清洗:去空、去重(与现有条目逐字比对)、限长
+function tc_memory_clean_text($s, $existing) {
+    $s = trim((string) $s);
+    if ($s === '') return '';
+    if (function_exists('mb_substr')) $s = mb_substr($s, 0, 500, 'UTF-8');
+    else $s = substr($s, 0, 500);
+    foreach ((array) $existing as $it) {
+        if (isset($it['content']) && trim((string) $it['content']) === $s) return '';
+    }
+    return $s;
+}
+
+function tc_memories_add_items(&$db, $user, $contents, $source) {
+    $doc = tc_memories_of($db, $user['id']);
+    $max = isset($db['settings']['memoryMaxCount']) ? (int) $db['settings']['memoryMaxCount'] : 50;
+    $max = max(1, min(200, $max));
+    $added = 0;
+    foreach ((array) $contents as $c) {
+        $c = tc_memory_clean_text($c, $doc['items']);
+        if ($c === '') continue;
+        $doc['items'][] = array('id' => tc_uid(8), 'content' => $c, 'createdAt' => tc_now(), 'source' => $source);
+        $added++;
+    }
+    // 超上限挤掉最旧的手动/自动条目
+    if (count($doc['items']) > $max) $doc['items'] = array_slice($doc['items'], -$max);
+    if ($added > 0) tc_memories_put($db, $user['id'], $doc);
+    return array($doc, $added);
+}
+
+function tc_api_memories_list() {
+    tc_with_db(false, function ($db) {
+        $user = tc_require_auth($db);
+        $doc = tc_memories_of($db, $user['id']);
+        tc_json(200, array(
+            'items' => tc_memories_public($doc['items']),
+            'enabled' => !empty($db['settings']['memoryEnabled']),
+            'max' => max(1, min(200, (int) (isset($db['settings']['memoryMaxCount']) ? $db['settings']['memoryMaxCount'] : 50))),
+        ));
+    });
+}
+
+// 手动添加一条(设置面板里用户自己写)
+function tc_api_memories_add() {
+    tc_with_db(true, function (&$db) {
+        $user = tc_require_auth($db);
+        $b = tc_read_json_body();
+        if (!tc_rate_limit_check('memadd:' . $user['id'], 60, 60000)) tc_fail(429, '操作过于频繁，请稍后再试');
+        list($doc, $added) = tc_memories_add_items($db, $user, array(isset($b['content']) ? $b['content'] : ''), 'manual');
+        if ($added === 0) tc_fail(409, '这条记忆已存在，或内容为空');
+        tc_json(200, array('ok' => true, 'items' => tc_memories_public($doc['items'])));
+    });
+}
+
+// 自动提取批量入库:前端把模型提取出的候选事实交上来,重复/超限在这里兜底
+function tc_api_memories_auto() {
+    tc_with_db(true, function (&$db) {
+        $user = tc_require_auth($db);
+        if (empty($db['settings']['memoryEnabled'])) tc_fail(403, '本站未启用跨对话记忆');
+        if (!tc_rate_limit_check('memauto:' . $user['id'], 20, 60000)) tc_fail(429, '操作过于频繁，请稍后再试');
+        $b = tc_read_json_body();
+        $items = isset($b['items']) && is_array($b['items']) ? $b['items'] : array();
+        if (count($items) > 10) $items = array_slice($items, 0, 10);
+        list($doc, $added) = tc_memories_add_items($db, $user, $items, 'auto');
+        tc_json(200, array('ok' => true, 'added' => $added, 'items' => tc_memories_public($doc['items'])));
+    });
+}
+
+function tc_api_memories_delete($id) {
+    tc_with_db(true, function (&$db) use ($id) {
+        $user = tc_require_auth($db);
+        $doc = tc_memories_of($db, $user['id']);
+        $kept = array();
+        $hit = false;
+        foreach ($doc['items'] as $it) {
+            if (isset($it['id']) && (string) $it['id'] === (string) $id) { $hit = true; continue; }
+            $kept[] = $it;
+        }
+        if (!$hit) tc_fail(404, '记忆不存在或已删除');
+        $doc['items'] = $kept;
+        tc_memories_put($db, $user['id'], $doc);
+        tc_json(200, array('ok' => true, 'items' => tc_memories_public($doc['items'])));
+    });
+}
+
+function tc_api_memories_clear() {
+    tc_with_db(true, function (&$db) {
+        $user = tc_require_auth($db);
+        tc_memories_put($db, $user['id'], array('items' => array()));
+        tc_json(200, array('ok' => true, 'items' => array()));
+    });
+}
+
+// ============================================================
+// 消息收藏夹:收藏某条 AI 回复(按 chatId+msgId 幂等),侧栏收藏面板可查看/跳转/删除。
+// ============================================================
+
+function tc_favorites_public($items) {
+    $out = array();
+    foreach ((array) $items as $it) {
+        if (!is_array($it) || !isset($it['id'])) continue;
+        $out[] = array(
+            'id' => (string) $it['id'],
+            'chatId' => (string) (isset($it['chatId']) ? $it['chatId'] : ''),
+            'chatTitle' => (string) (isset($it['chatTitle']) ? $it['chatTitle'] : ''),
+            'msgId' => (string) (isset($it['msgId']) ? $it['msgId'] : ''),
+            'model' => (string) (isset($it['model']) ? $it['model'] : ''),
+            'content' => (string) (isset($it['content']) ? $it['content'] : ''),
+            'createdAt' => (int) (isset($it['createdAt']) ? $it['createdAt'] : 0),
+        );
+    }
+    return $out;
+}
+
+function tc_api_favorites_list() {
+    tc_with_db(false, function ($db) {
+        $user = tc_require_auth($db);
+        $doc = tc_favorites_of($db, $user['id']);
+        tc_json(200, array('items' => tc_favorites_public($doc['items'])));
+    });
+}
+
+// 收藏/取消收藏(幂等开关):content 由前端截好,这里再兜底限长
+function tc_api_favorites_toggle() {
+    tc_with_db(true, function (&$db) {
+        $user = tc_require_auth($db);
+        if (!tc_rate_limit_check('fav:' . $user['id'], 60, 60000)) tc_fail(429, '操作过于频繁，请稍后再试');
+        $b = tc_read_json_body();
+        $chatId = trim((string) (isset($b['chatId']) ? $b['chatId'] : ''));
+        $msgId = trim((string) (isset($b['msgId']) ? $b['msgId'] : ''));
+        if ($chatId === '' || $msgId === '') tc_fail(400, '缺少消息标识');
+        $doc = tc_favorites_of($db, $user['id']);
+        $kept = array();
+        $hit = false;
+        foreach ($doc['items'] as $it) {
+            if (isset($it['chatId']) && (string) $it['chatId'] === $chatId && isset($it['msgId']) && (string) $it['msgId'] === $msgId) { $hit = true; continue; }
+            $kept[] = $it;
+        }
+        if ($hit) {
+            $doc['items'] = $kept;
+            tc_favorites_put($db, $user['id'], $doc);
+            tc_json(200, array('ok' => true, 'added' => false, 'items' => tc_favorites_public($doc['items'])));
+        }
+        $content = (string) (isset($b['content']) ? $b['content'] : '');
+        if (function_exists('mb_substr')) $content = mb_substr($content, 0, 8000, 'UTF-8');
+        else $content = substr($content, 0, 8000);
+        $kept[] = array(
+            'id' => tc_uid(8),
+            'chatId' => $chatId,
+            'msgId' => $msgId,
+            'chatTitle' => trim((string) (isset($b['chatTitle']) ? $b['chatTitle'] : '')),
+            'model' => trim((string) (isset($b['model']) ? $b['model'] : '')),
+            'content' => $content,
+            'createdAt' => tc_now(),
+        );
+        // 超上限挤掉最旧的收藏
+        if (count($kept) > TC_FAVORITES_CAP) $kept = array_slice($kept, -TC_FAVORITES_CAP);
+        $doc['items'] = $kept;
+        tc_favorites_put($db, $user['id'], $doc);
+        tc_json(200, array('ok' => true, 'added' => true, 'items' => tc_favorites_public($doc['items'])));
+    });
+}
+
+function tc_api_favorites_delete($id) {
+    tc_with_db(true, function (&$db) use ($id) {
+        $user = tc_require_auth($db);
+        $doc = tc_favorites_of($db, $user['id']);
+        $kept = array();
+        $hit = false;
+        foreach ($doc['items'] as $it) {
+            if (isset($it['id']) && (string) $it['id'] === (string) $id) { $hit = true; continue; }
+            $kept[] = $it;
+        }
+        if (!$hit) tc_fail(404, '收藏不存在或已删除');
+        $doc['items'] = $kept;
+        tc_favorites_put($db, $user['id'], $doc);
+        tc_json(200, array('ok' => true, 'items' => tc_favorites_public($doc['items'])));
+    });
+}
+
+// ============================================================
+// TOTP 两步验证:setup(生成密钥暂存)→ enable(验证码确认后生效)→ disable。
+// 密钥只暂存在用户记录的 totpPending(未生效不参与登录校验),确认后转正为 totpSecret。
+// ============================================================
+
+function tc_api_me_totp_setup() {
+    tc_with_db(true, function (&$db) {
+        $user = tc_require_auth($db);
+        if (empty($db['settings']['totpEnabled'])) tc_fail(403, '本站未开放两步验证');
+        if (!empty($user['totpSecret'])) tc_fail(409, '已开启两步验证，请先关闭后再重新绑定');
+        $secret = tc_totp_generate_secret();
+        $user['totpPending'] = $secret;
+        $user['totpPendingAt'] = tc_now();
+        tc_replace_user($db, $user);
+        $issuer = (string) (isset($db['settings']['siteName']) && $db['settings']['siteName'] !== '' ? $db['settings']['siteName'] : 'TinyChat');
+        tc_json(200, array(
+            'secret' => $secret,
+            'uri' => tc_totp_uri($secret, (string) $user['name'], $issuer),
+        ));
+    });
+}
+
+function tc_api_me_totp_enable() {
+    tc_with_db(true, function (&$db) {
+        $user = tc_require_auth($db);
+        if (empty($db['settings']['totpEnabled'])) tc_fail(403, '本站未开放两步验证');
+        if (empty($user['totpPending'])) tc_fail(400, '请先获取绑定二维码');
+        // 暂存密钥 15 分钟未确认即作废,防半截绑定残留
+        if (tc_now() - (int) (isset($user['totpPendingAt']) ? $user['totpPendingAt'] : 0) > 15 * 60 * 1000) {
+            unset($user['totpPending'], $user['totpPendingAt']);
+            tc_replace_user($db, $user);
+            tc_fail(400, '绑定已超时，请重新获取二维码');
+        }
+        $b = tc_read_json_body();
+        $code = trim((string) (isset($b['code']) ? $b['code'] : ''));
+        if (!tc_totp_verify($user['totpPending'], $code)) tc_fail(400, '验证码不正确，请确认验证器时间与手机时间一致');
+        $user['totpSecret'] = $user['totpPending'];
+        unset($user['totpPending'], $user['totpPendingAt']);
+        tc_replace_user($db, $user);
+        tc_audit($user, '开启两步验证', '用户 ' . $user['name'] . ' 开启了 TOTP');
+        tc_json(200, array('ok' => true, 'user' => tc_sanitize_user($user)));
+    });
+}
+
+function tc_api_me_totp_disable() {
+    tc_with_db(true, function (&$db) {
+        $user = tc_require_auth($db);
+        if (empty($user['totpSecret'])) tc_fail(409, '尚未开启两步验证');
+        $b = tc_read_json_body();
+        $code = trim((string) (isset($b['code']) ? $b['code'] : ''));
+        if (!tc_totp_verify($user['totpSecret'], $code)) tc_fail(400, '验证码不正确');
+        unset($user['totpSecret']);
+        unset($user['totpPending'], $user['totpPendingAt']);
+        tc_replace_user($db, $user);
+        tc_audit($user, '关闭两步验证', '用户 ' . $user['name'] . ' 关闭了自己的 TOTP');
+        tc_json(200, array('ok' => true, 'user' => tc_sanitize_user($user)));
+    });
+}
+
+// ============================================================
+// 每日摘要(惰性):不依赖常驻进程 —— 前端每天首次加载时拉一次,服务端即时聚合
+// 昨天的调用量/消耗/活跃模型与更新过的会话。没有上游调用、没有定时器。
+// ============================================================
+
+function tc_api_me_digest() {
+    tc_with_db(false, function ($db) {
+        $user = tc_require_auth($db);
+        $yday = date('Y-m-d', time() - 86400);
+        $rows = tc_usage_rows($db, $user['id'], array($yday));
+        $row = $rows ? $rows[0] : array('calls' => 0, 'cost' => 0, 'prompt' => 0, 'completion' => 0, 'models' => array());
+        // 昨天更新过的会话:取标题前 5 条做回忆入口
+        $chats = tc_chats_of($db, $user['id']);
+        $yStart = strtotime($yday . ' 00:00:00') * 1000;
+        $yEnd = $yStart + 86400000;
+        $touched = array();
+        foreach ($chats as $c) {
+            $at = isset($c['updatedAt']) ? (float) $c['updatedAt'] : 0;
+            if ($at < $yStart || $at >= $yEnd) continue;
+            $touched[] = array('id' => (string) (isset($c['id']) ? $c['id'] : ''), 'title' => (string) (isset($c['title']) ? $c['title'] : ''));
+            if (count($touched) >= 5) break;
+        }
+        tc_json(200, array(
+            'date' => $yday,
+            'calls' => (int) (isset($row['calls']) ? $row['calls'] : 0),
+            'cost' => (float) (isset($row['cost']) ? $row['cost'] : 0),
+            'prompt' => (int) (isset($row['prompt']) ? $row['prompt'] : 0),
+            'completion' => (int) (isset($row['completion']) ? $row['completion'] : 0),
+            'models' => isset($row['models']) && is_array($row['models']) ? $row['models'] : array(),
+            'chats' => $touched,
+        ));
+    });
 }
 
 // 游客登录:为每位访客自动创建一个独立账号(归入游客组、按 guestRounds 发放额度),
@@ -2894,7 +3270,7 @@ function tc_api_admin_export_codes($id) {
 
 function tc_api_admin_save_package() {
     tc_with_db(true, function (&$db) {
-        tc_require_admin($db); $b = tc_read_json_body();
+        $pkgAdmin = tc_require_admin($db); $b = tc_read_json_body();
         $id = trim((string) (isset($b['id']) ? $b['id'] : ''));
         $price = (isset($b['price']) && (string) $b['price'] !== '') ? round((float) $b['price'], 2) : null;
         if ($price !== null && $price < 0) $price = 0;
@@ -2906,6 +3282,7 @@ function tc_api_admin_save_package() {
         if ($id === '') { foreach ($db['packages'] as $old) if ($old['id'] === $p['id']) tc_fail(409, '套餐 ID 冲突'); }
         $found = false; foreach ($db['packages'] as $i => $old) if ($old['id'] === $p['id']) { $p['createdAt'] = $old['createdAt'] ?? $p['createdAt']; $db['packages'][$i] = $p; $found = true; }
         if (!$found) $db['packages'][] = $p;
+        if (!tc_is_demo_user($pkgAdmin)) tc_audit($pkgAdmin, '保存额度套餐', '套餐「' . $p['name'] . '」（' . $p['quota'] . ' 次）已保存');
         tc_json(200, array('package' => $p));
     });
 }
@@ -2980,10 +3357,11 @@ function tc_api_admin_save_thinking() {
 
 function tc_api_admin_delete_package($id) {
     tc_with_db(true, function (&$db) use ($id) {
-        tc_require_admin($db);
+        $pkgAdmin = tc_require_admin($db);
         $before = count($db['packages']);
         $db['packages'] = array_values(array_filter($db['packages'], function ($p) use ($id) { return $p['id'] !== $id; }));
         if (count($db['packages']) === $before) tc_fail(404, '套餐不存在');
+        if (!tc_is_demo_user($pkgAdmin)) tc_audit($pkgAdmin, '删除额度套餐', '套餐 ' . $id . ' 被删除');
         tc_json(200, array('ok' => true));
     });
 }
@@ -3495,6 +3873,7 @@ function tc_api_admin_invalidate_sessions() {
         $admin = tc_require_admin($db);
         if (tc_is_demo_user($admin)) tc_fail(403, '演示账号不能强制全站下线');
         $db['settings']['authEpoch'] = (int) (isset($db['settings']['authEpoch']) ? $db['settings']['authEpoch'] : 1) + 1;
+        tc_audit($admin, '强制全站下线', 'authEpoch 递增为 ' . (int) $db['settings']['authEpoch']);
         tc_json(200, array('ok' => true, 'authEpoch' => (int) $db['settings']['authEpoch']));
     });
 }
@@ -3910,6 +4289,7 @@ function tc_api_admin_save_settings() {
         if (!empty($db['settings']['modelAggEnabled']) && !empty($db['settings']['modelAggAutoMerge'])) {
             tc_model_groups_sync_auto($db);
         }
+        if (!tc_is_demo_user($admin)) tc_audit($admin, '保存平台设置', '更新了站点配置');
         tc_json(200, array('settings' => tc_admin_settings_public($db['settings'], tc_is_demo_user($admin))));
     });
 }
@@ -3935,7 +4315,12 @@ function tc_api_admin_update_check() {
 function tc_api_admin_update_perform() {
     // 演示管理员不得替换程序文件:演示快照只覆盖设置/供应商等数据,不覆盖代码本身,
     // 一次「在线更新」会把站点永久改成另一个版本,超出「改动 10 分钟后自动还原」的承诺。
-    tc_with_db(false, function ($db) { tc_demo_guard(tc_require_admin($db), '演示管理员不可执行程序更新'); });
+    $updAdmin = null;
+    tc_with_db(false, function ($db) use (&$updAdmin) {
+        $updAdmin = tc_require_admin($db);
+        tc_demo_guard($updAdmin, '演示管理员不可执行程序更新');
+        if (!tc_is_demo_user($updAdmin)) tc_audit($updAdmin, '在线更新', '发起了程序在线更新');
+    });
     tc_update_perform();
 }
 
@@ -3987,6 +4372,13 @@ function tc_api_admin_logs() {
         $admin = tc_require_admin($db);
         $q = tc_query();
         $logs = tc_list_logs(isset($q['limit']) ? $q['limit'] : 100);
+        // 类型筛选:kind=audit 只看管理员操作审计;其余值原样返回(前台自行过滤)
+        if (isset($q['kind']) && (string) $q['kind'] !== '') {
+            $kind = (string) $q['kind'];
+            $logs = array_values(array_filter($logs, function ($row) use ($kind) {
+                return is_array($row) && isset($row['kind']) && (string) $row['kind'] === $kind;
+            }));
+        }
         // 演示管理员看日志时剔除与用户隐私相关的字段:
         //  - ip / userName / userId:来源地址与身份
         //  - prompt / reply:这两项就是用户对话内容,而演示身份本就被禁止查看用户对话,
@@ -4004,8 +4396,9 @@ function tc_api_admin_logs() {
 
 function tc_api_admin_delete_logs() {
     tc_with_db(false, function ($db) {
-        tc_require_admin($db);
+        $admin = tc_require_admin($db);
         tc_clear_logs();
+        if (!tc_is_demo_user($admin)) tc_audit($admin, '清空运行日志', '运行日志被清空');
         tc_json(200, array('ok' => true));
     });
 }
@@ -4026,10 +4419,12 @@ function tc_api_admin_backup_list() {
 
 function tc_api_admin_backup_create() {
     tc_with_db(true, function (&$db) {
-        tc_demo_guard(tc_require_admin($db), '演示管理员不可下载或管理数据备份');
+        $admin = tc_require_admin($db);
+        tc_demo_guard($admin, '演示管理员不可下载或管理数据备份');
         $name = tc_backup_create();
         if ($name === null) tc_fail(500, '备份创建失败，请检查 data/backup 目录写权限');
         tc_backup_prune($db['settings']);
+        tc_audit($admin, '创建备份', '手动备份整库为 ' . $name);
         tc_db_skip_write();
         tc_json(200, array('ok' => true, 'created' => $name, 'backups' => tc_backup_list()));
     });
@@ -4053,7 +4448,8 @@ function tc_api_admin_backup_download() {
 
 function tc_api_admin_backup_restore() {
     tc_with_db(true, function (&$db) {
-        tc_demo_guard(tc_require_admin($db), '演示管理员不可下载或管理数据备份');
+        $admin = tc_require_admin($db);
+        tc_demo_guard($admin, '演示管理员不可下载或管理数据备份');
         $b = tc_read_json_body();
         $full = tc_backup_path(isset($b['id']) ? $b['id'] : '');
         if ($full === '') tc_fail(404, '备份不存在');
@@ -4062,6 +4458,7 @@ function tc_api_admin_backup_restore() {
         if (!is_array($data) || empty($data['users'])) tc_fail(400, '备份文件损坏或不是有效的数据库备份');
         // 用备份内容整体替换当前数据库,走统一的迁移与提交流程
         $db = tc_migrate_db($data);
+        if (!tc_is_demo_user($admin)) tc_audit($admin, '恢复备份', '从备份 ' . (isset($b['id']) ? $b['id'] : '') . ' 恢复了整库（' . count($db['users']) . ' 个用户）');
         tc_json(200, array('ok' => true, 'restoredAt' => tc_now(), 'users' => count($db['users'])));
     });
 }
@@ -4338,6 +4735,7 @@ function tc_api_admin_create_user() {
         tc_set_password($user, $password);
         $db['users'][] = $user;
         if ($quota > 0) tc_add_quota($db, $user, $quota);
+        if (!tc_is_demo_user($user)) tc_audit($user, '创建用户', '管理员创建了账号 ' . $user['name']);
         tc_json(200, array('user' => tc_sanitize_user($user)));
     });
 }
@@ -4423,13 +4821,15 @@ function tc_api_admin_update_user() {
             }
         }
         tc_replace_user($db, $user);
+        if (!tc_is_demo_user($admin)) tc_audit($admin, '更新用户', '用户 ' . (isset($user['name']) ? $user['name'] : (string) $user['id']) . ' 的资料被更新');
         tc_json(200, array('user' => tc_sanitize_user($user)));
     });
 }
 
 function tc_api_admin_set_quota() {
     tc_with_db(true, function (&$db) {
-        tc_demo_guard(tc_require_admin($db), '演示管理员不能调整用户额度');
+        $admin = tc_require_admin($db);
+        tc_demo_guard($admin, '演示管理员不能调整用户额度');
         $b = tc_read_json_body();
         $user = null;
         foreach ($db['users'] as $u) if ($u['id'] === (string) (isset($b['userId']) ? $b['userId'] : '')) { $user = $u; break; }
@@ -4457,6 +4857,7 @@ function tc_api_admin_set_quota() {
             $user['quotaGrants'] = array();
             tc_replace_user($db, $user);
         }
+        if (!tc_is_demo_user($admin)) tc_audit($admin, '调整用户额度', '用户 ' . (isset($user['name']) ? $user['name'] : (string) $user['id']) . ' 的额度被调整');
         tc_json(200, array('user' => tc_sanitize_user($user)));
     });
 }
@@ -4476,6 +4877,17 @@ function tc_purge_user(&$db, $id) {
     $db['userDeletedChats'] = tc_object_map($delMap);
     // 笔记文档、修订号与分享链接一并清除
     tc_drop_user_notes($db, $id);
+    // 笔记云端版本历史一并清除
+    $ntvMap = tc_assoc(isset($db['userNoteVersions']) ? $db['userNoteVersions'] : array());
+    unset($ntvMap[$id]);
+    $db['userNoteVersions'] = tc_object_map($ntvMap);
+    // 跨对话记忆与收藏夹不再保留
+    $memMap = tc_assoc(isset($db['userMemories']) ? $db['userMemories'] : array());
+    unset($memMap[$id]);
+    $db['userMemories'] = tc_object_map($memMap);
+    $favMap = tc_assoc(isset($db['userFavorites']) ? $db['userFavorites'] : array());
+    unset($favMap[$id]);
+    $db['userFavorites'] = tc_object_map($favMap);
     // 工具箱里的 HTML 一并清除(内容就在库里,没有旁挂文件)
     tc_drop_user_toolbox($db, $id);
     // 用户设置(偏好/外观/群聊配置)同样不再保留
@@ -4520,6 +4932,15 @@ function tc_soft_delete_user(&$db, $id) {
         unset($delMap[$id]);
         $db['userDeletedChats'] = tc_object_map($delMap);
         tc_drop_user_notes($db, $id);
+        $ntvMap = tc_assoc(isset($db['userNoteVersions']) ? $db['userNoteVersions'] : array());
+        unset($ntvMap[$id]);
+        $db['userNoteVersions'] = tc_object_map($ntvMap);
+        $memMap = tc_assoc(isset($db['userMemories']) ? $db['userMemories'] : array());
+        unset($memMap[$id]);
+        $db['userMemories'] = tc_object_map($memMap);
+        $favMap2 = tc_assoc(isset($db['userFavorites']) ? $db['userFavorites'] : array());
+        unset($favMap2[$id]);
+        $db['userFavorites'] = tc_object_map($favMap2);
         tc_drop_user_toolbox($db, $id);
         tc_drop_user_settings($db, $id);
         $ownIds = array();
@@ -4553,6 +4974,7 @@ function tc_api_admin_delete_user($id) {
         if ($idx < 0) tc_fail(404, '用户不存在');
         if ($db['users'][$idx]['id'] === $admin['id']) tc_fail(400, '不能删除当前登录的管理员账号');
         $res = tc_purge_user($db, $id);
+        if (!tc_is_demo_user($admin)) tc_audit($admin, '删除用户', '用户 ' . (isset($db['users'][$idx]['name']) ? $db['users'][$idx]['name'] : $id) . ' 被删除');
         tc_json(200, array('ok' => true, 'removedProviders' => $res['removedProviders']));
     });
 }
@@ -4586,6 +5008,7 @@ function tc_api_admin_purge_guests() {
             if (isset($p['ownerId']) && in_array($p['ownerId'], $removedIds, true)) $ownIds[] = $p['id'];
         }
         foreach ($ownIds as $pid) tc_remove_provider($db, $pid);
+        if (!tc_is_demo_user($admin)) tc_audit($admin, '清除游客账号', '清除了 ' . $removed . ' 个游客账号');
         tc_json(200, array('ok' => true, 'removed' => $removed, 'removedProviders' => count($ownIds)));
     });
 }
@@ -4622,6 +5045,7 @@ function tc_api_admin_bulk_delete_users() {
             foreach ($ownIds as $pid) tc_remove_provider($db, $pid);
             $deleted++;
         }
+        if (!tc_is_demo_user($admin)) tc_audit($admin, '批量删除用户', '删除了 ' . $deleted . ' 个账号');
         tc_json(200, array('ok' => true, 'deleted' => $deleted, 'skipped' => count($skipped)));
     });
 }
@@ -4703,13 +5127,14 @@ function tc_api_admin_delete_group($id) {
 
 function tc_api_admin_set_default_group() {
     tc_with_db(true, function (&$db) {
-        tc_require_admin($db);
+        $admin = tc_require_admin($db);
         $b = tc_read_json_body();
         $groupId = isset($b['groupId']) ? trim((string) $b['groupId']) : '';
         $group = $groupId !== '' ? tc_group_by_id($db, $groupId) : null;
         if (!$group) tc_fail(400, '请选择一个用户组');
         if (isset($group['role']) && $group['role'] === 'admin') tc_fail(400, '管理员组不能作为注册默认组');
         $db['settings']['defaultGroupId'] = $groupId;
+        if (!tc_is_demo_user($admin)) tc_audit($admin, '设置注册默认组', '新用户注册默认组改为 ' . (isset($group['name']) ? $group['name'] : $groupId));
         tc_json(200, array('defaultGroupId' => $groupId));
     });
 }
@@ -5908,6 +6333,86 @@ function tc_api_notes_save() {
     });
 }
 
+// ============ 笔记云端版本历史(ntv:{uid} 分片行) ============
+// 本机留档(oc_notes_ver_*)换设备/清浏览器就没了;这里按保存节奏把快照同步一份到云端。
+// 每笔记最多 TC_NOTE_VERSIONS_CAP 份、单份截断 TC_NOTE_VERSION_SNAPSHOT_BYTES,
+// 内容与上一份完全相同的不重复存;5 分钟内的连续保存合并为一份(替换最新)。
+define('TC_NOTE_VERSIONS_CAP', 5);
+define('TC_NOTE_VERSION_SNAPSHOT_BYTES', 40000);
+define('TC_NOTE_VERSION_MERGE_MS', 5 * 60 * 1000);
+
+function tc_note_versions_of(&$db, $userId) {
+    $map = tc_assoc(isset($db['userNoteVersions']) ? $db['userNoteVersions'] : null);
+    $db['userNoteVersions'] = tc_object_map($map);
+    $doc = isset($map[$userId]) && is_array($map[$userId]) ? $map[$userId] : array();
+    return is_array($doc) ? $doc : array();
+}
+
+function tc_note_versions_put(&$db, $userId, $doc) {
+    $map = tc_assoc(isset($db['userNoteVersions']) ? $db['userNoteVersions'] : null);
+    $map[$userId] = $doc;
+    $db['userNoteVersions'] = tc_object_map($map);
+}
+
+// POST /api/notes/versions {noteId, content, updatedAt}:推一份快照(幂等去重 + 合并窗口)
+function tc_api_note_versions_push() {
+    tc_with_db(true, function (&$db) {
+        $user = tc_require_auth($db);
+        tc_note_feature_guard($db, $user);
+        if (!tc_rate_limit_check('notever:' . $user['id'], 120, 60000)) {
+            tc_fail(429, '操作过于频繁，请稍后再试');
+        }
+        $b = tc_read_json_body(64 * 1024);
+        $noteId = substr(trim((string) (isset($b['noteId']) ? $b['noteId'] : '')), 0, 64);
+        $content = (string) (isset($b['content']) ? $b['content'] : '');
+        $updatedAt = (float) (isset($b['updatedAt']) ? $b['updatedAt'] : tc_now());
+        if ($noteId === '' || $content === '') tc_json(200, array('ok' => true, 'skipped' => 'empty'));
+        $doc = tc_note_versions_of($db, $user['id']);
+        $items = isset($doc[$noteId]) && is_array($doc[$noteId]) ? $doc[$noteId] : array();
+        $clip = function_exists('mb_substr') ? mb_substr($content, 0, TC_NOTE_VERSION_SNAPSHOT_BYTES, 'UTF-8') : substr($content, 0, TC_NOTE_VERSION_SNAPSHOT_BYTES);
+        $now = tc_now();
+        if ($items) {
+            $last = $items[count($items) - 1];
+            // 内容没变不重复存
+            if ((string) ($last['c'] ?? '') === $clip) {
+                $items[count($items) - 1]['t'] = (float) ($updatedAt ?: ($last['t'] ?? $now));
+                $doc[$noteId] = $items;
+                tc_note_versions_put($db, $user['id'], $doc);
+                tc_json(200, array('ok' => true, 'kept' => true, 'count' => count($items)));
+            }
+            // 5 分钟内的连续保存合并为一份
+            if ($now - (float) ($last['t'] ?? 0) < TC_NOTE_VERSION_MERGE_MS) {
+                $items[count($items) - 1] = array('t' => $updatedAt ?: $now, 'c' => $clip);
+                $doc[$noteId] = $items;
+                tc_note_versions_put($db, $user['id'], $doc);
+                tc_json(200, array('ok' => true, 'merged' => true, 'count' => count($items)));
+            }
+        }
+        $items[] = array('t' => $updatedAt ?: $now, 'c' => $clip);
+        if (count($items) > TC_NOTE_VERSIONS_CAP) $items = array_slice($items, -TC_NOTE_VERSIONS_CAP);
+        $doc[$noteId] = $items;
+        tc_note_versions_put($db, $user['id'], $doc);
+        tc_json(200, array('ok' => true, 'count' => count($items)));
+    });
+}
+
+// GET /api/notes/versions?noteId=:取某笔记的云端快照列表(旧→新)
+function tc_api_note_versions_list() {
+    tc_with_db(false, function ($db) {
+        $user = tc_require_auth($db);
+        tc_note_feature_guard($db, $user);
+        $q = tc_query();
+        $noteId = substr(trim((string) (isset($q['noteId']) ? $q['noteId'] : '')), 0, 64);
+        $doc = tc_note_versions_of($db, $user['id']);
+        $items = ($noteId !== '' && isset($doc[$noteId]) && is_array($doc[$noteId])) ? $doc[$noteId] : array();
+        $out = array();
+        foreach ($items as $it) {
+            $out[] = array('t' => (float) (isset($it['t']) ? $it['t'] : 0), 'content' => (string) (isset($it['c']) ? $it['c'] : ''));
+        }
+        tc_json(200, array('items' => $out));
+    });
+}
+
 // ============ 在线工具箱(/api/sync/toolbox + /api/toolbox/page) ============
 // 用户把自写的 HTML 单页存进自己的工具箱,随时打开运行。同步模型与笔记完全同构:
 // 整份文档 + 乐观并发修订号(baseRevision),冲突时 409 带回云端文档。
@@ -6356,7 +6861,7 @@ function tc_settings_model_ref($v, $max) {
 function tc_settings_prefs($raw) {
     $out = array();
     if (!is_array($raw)) return $out;
-    $boolKeys = array('stream', 'followups', 'autotitle', 'aiJudge', 'elapsed', 'reasoning', 'showApiChats', 'sidebarCollapsed');
+    $boolKeys = array('stream', 'followups', 'autotitle', 'aiJudge', 'elapsed', 'reasoning', 'showApiChats', 'sidebarCollapsed', 'memoryOn');
     $enums = array(
         'theme' => array('system', 'light', 'dark'),
         'reasoningEffort' => array('off', 'low', 'medium', 'high'),
@@ -6373,6 +6878,8 @@ function tc_settings_prefs($raw) {
         // 主题市场的主题包 id(见 static/js/theme-boot.js 的 OC_THEME_PACKS)。
         // 只存 id 不存样式:样式表随发布包分发,存 id 才能让主题更新跟着版本走。
         'themePack' => 32,
+        // 全局自定义指令:随设置云同步,2000 字封顶(前端输入框同限)
+        'customInstructions' => 2000,
     );
     $i = 0;
     foreach ($raw as $k => $v) {
@@ -7007,6 +7514,8 @@ function tc_api_note_share_create() {
             unset($shares[$t]);
         }
         $token = $existToken !== '' ? $existToken : tc_uid(9);
+        // 分享页评论:属主可勾选允许访客留言;留言随分享记录存,属主可查看/清空
+        $allowComments = !empty($b['allowComments']);
         $share = array(
             'token' => $token,
             'ownerId' => $user['id'],
@@ -7014,7 +7523,12 @@ function tc_api_note_share_create() {
             'mode' => $mode,
             'createdAt' => tc_now(),
             'expireAt' => $expireAt,
+            'allowComments' => $allowComments,
         );
+        if (isset($shares[$token]) && is_array($shares[$token]) && isset($shares[$token]['comments'])) {
+            // 保留旧令牌的既有留言(改设置场景);重新生成令牌则留言一并作废
+            if ($keepToken) $share['comments'] = $shares[$token]['comments'];
+        }
         $shares[$token] = $share;
         $db['noteShares'] = tc_object_map($shares);
         // 笔记本体同步分享状态(客户端展示用;权威状态始终以 noteShares 为准)
@@ -7029,6 +7543,8 @@ function tc_api_note_share_create() {
                 'noteId' => $noteId, 'token' => $token, 'mode' => $mode,
                 'createdAt' => (float) (isset($shares[$token]['createdAt']) ? $shares[$token]['createdAt'] : $share['createdAt']),
                 'expireAt' => $expireAt, 'kept' => $existToken !== '',
+                'allowComments' => $allowComments,
+                'commentCount' => isset($share['comments']) && is_array($share['comments']) ? count($share['comments']) : 0,
             ),
             'url' => '/n/' . $token,
         ));
@@ -7121,7 +7637,98 @@ function tc_api_note_shared_get($token) {
         list($idx, $note) = tc_note_find_in_doc($doc, $share['noteId']);
         if ($idx < 0) tc_fail(404, '笔记不存在或已被删除');
         $bodyOnly = !array_key_exists('notesShareBodyOnly', $db['settings']) || !empty($db['settings']['notesShareBodyOnly']);
-        tc_json(200, array('note' => tc_public_shared_note($note, (string) $share['mode'], $bodyOnly, (string) $token)));
+        // 分享页评论:开启时把留言一并下发(访客可看可评)
+        $comments = array();
+        $allowComments = !empty($share['allowComments']);
+        if ($allowComments && isset($share['comments']) && is_array($share['comments'])) {
+            foreach ($share['comments'] as $c) {
+                if (!is_array($c)) continue;
+                $comments[] = array(
+                    't' => (float) (isset($c['t']) ? $c['t'] : 0),
+                    'name' => (string) (isset($c['name']) ? $c['name'] : '访客'),
+                    'text' => (string) (isset($c['text']) ? $c['text'] : ''),
+                );
+            }
+        }
+        tc_json(200, array(
+            'note' => tc_public_shared_note($note, (string) $share['mode'], $bodyOnly, (string) $token),
+            'allowComments' => $allowComments,
+            'comments' => $comments,
+        ));
+    });
+}
+
+// 分享页留言:访客无需登录,按 token 限流防灌水;留言随分享记录存,上限 100 条
+function tc_api_note_shared_comment($token) {
+    tc_with_db(true, function (&$db) use ($token) {
+        if (!tc_rate_limit_check('notecmt:' . tc_client_ip(), 10, 3600000)) {
+            tc_fail(429, '留言过于频繁，请稍后再试');
+        }
+        $b = tc_read_json_body();
+        $text = trim((string) (isset($b['text']) ? $b['text'] : ''));
+        $name = trim((string) (isset($b['name']) ? $b['name'] : ''));
+        if ($text === '') tc_fail(400, '请填写留言内容');
+        if (function_exists('mb_substr')) {
+            $text = mb_substr($text, 0, 500, 'UTF-8');
+            $name = $name !== '' ? mb_substr($name, 0, 40, 'UTF-8') : '访客';
+        } else {
+            $text = substr($text, 0, 500);
+            $name = $name !== '' ? substr($name, 0, 40) : '访客';
+        }
+        $shares = tc_assoc(isset($db['noteShares']) ? $db['noteShares'] : array());
+        $share = isset($shares[$token]) && is_array($shares[$token]) ? $shares[$token] : null;
+        if (!$share) tc_fail(404, '分享不存在或已失效');
+        if (!empty($share['expireAt']) && (int) $share['expireAt'] < tc_now()) tc_fail(404, '分享不存在或已失效');
+        if (empty($share['allowComments'])) tc_fail(403, '作者未开放这篇笔记的留言');
+        $comments = isset($share['comments']) && is_array($share['comments']) ? $share['comments'] : array();
+        $comments[] = array('t' => tc_now(), 'name' => $name, 'text' => $text);
+        if (count($comments) > 100) $comments = array_slice($comments, -100);
+        $share['comments'] = $comments;
+        $shares[$token] = $share;
+        $db['noteShares'] = tc_object_map($shares);
+        tc_json(200, array('ok' => true, 'comments' => array_map(function ($c) {
+            return array('t' => (float) ($c['t'] ?? 0), 'name' => (string) ($c['name'] ?? '访客'), 'text' => (string) ($c['text'] ?? ''));
+        }, $comments)));
+    });
+}
+
+// 属主查看/清空某篇笔记分享的留言
+function tc_api_note_share_comments() {
+    tc_with_db(true, function (&$db) {
+        $user = tc_require_auth($db);
+        $q = tc_query();
+        $noteId = substr(trim((string) (isset($q['noteId']) ? $q['noteId'] : '')), 0, 64);
+        if ($noteId === '') tc_fail(400, '缺少笔记 ID');
+        $shares = tc_assoc(isset($db['noteShares']) ? $db['noteShares'] : array());
+        $share = null;
+        $shareToken = '';
+        foreach ($shares as $t => $s) {
+            if ((string) ($s['ownerId'] ?? '') === (string) $user['id'] && (string) ($s['noteId'] ?? '') === $noteId) { $share = $s; $shareToken = (string) $t; break; }
+        }
+        if ($_SERVER['REQUEST_METHOD'] === 'DELETE') {
+            if ($share) {
+                $share['comments'] = array();
+                $shares[$shareToken] = $share;
+                $db['noteShares'] = tc_object_map($shares);
+            }
+            tc_json(200, array('ok' => true, 'comments' => array()));
+        }
+        $comments = array();
+        if ($share && isset($share['comments']) && is_array($share['comments'])) {
+            foreach ($share['comments'] as $c) {
+                if (!is_array($c)) continue;
+                $comments[] = array(
+                    't' => (float) (isset($c['t']) ? $c['t'] : 0),
+                    'name' => (string) (isset($c['name']) ? $c['name'] : '访客'),
+                    'text' => (string) (isset($c['text']) ? $c['text'] : ''),
+                );
+            }
+        }
+        tc_json(200, array(
+            'comments' => $comments,
+            'allowComments' => $share ? !empty($share['allowComments']) : false,
+            'token' => $shareToken,
+        ));
     });
 }
 

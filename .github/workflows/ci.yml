@@ -151,6 +151,10 @@ jobs:
         # 用户消息 content 里内联着几十万字符的 base64 图片,截断点落在 base64 中间时
         # 渲染端只能当文字画出来 —— 这种「只有换设备才复现」的问题,靠 PHP 侧断言截断形状。
         run: php tests/chat-sync-trunc.php
+      - name: 新功能自检(TOTP 已知向量 / 邮件队列 / 记忆去重与上限 / 收藏 / 笔记云端版本 / 额度预警 / 审计 / 新设置项)
+        run: php tests/new-features.php
+      - name: 新功能源码契约自检(mfa 票据两端消费 / 记忆注入 / 收藏接线 / 截断续写 / 默认主题 / extras 挂载)
+        run: node tests/new-features-contracts.js
 
   e2e:
     name: E2E(PHP ${{ matrix.php }})
@@ -304,6 +308,11 @@ jobs:
       # 「客户端把列表推回云端后标记不丢」—— 那个缺陷本机看不出来,换设备才炸。
       - name: API 对话分组 GUI 自检(顺序 / 归属 / 独立折叠 / 同步往返后不退化)
         run: node tests/chat-api-group-gui.mjs
+      # 新功能接线自检:TOTP 绑定走真端点、收藏亮星走真开关、斜杠指令回填、
+      # 「?」速查、finish_reason=length 的继续生成按钮。契约测试只看源码,
+      # 「按钮绑没绑上 / 端点通不通」必须真页面点一遍(extras.min.js 404 就是在这里现形的)。
+      - name: 新功能 GUI 自检(TOTP 绑定 / 收藏与继续生成 / 斜杠指令 / 快捷键速查 / 默认主题)
+        run: node tests/new-features-gui.mjs
       # localStorage 每源只有约 5MB,而会话里带着图片本体(一张 3MB 的图在本地就是 800 万字符:
       # content 内联一份、attachments 再存一份)。「写不下」只能在真浏览器里量:先二分出单键
       # 上限,再拿一份超过它的会话走一遍「写 → 拦截云同步重载读回」。

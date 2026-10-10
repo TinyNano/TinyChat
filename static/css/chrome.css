@@ -5914,3 +5914,115 @@ body.admin-body { overflow: visible !important; }
 .upd-notes table { border-collapse: collapse; max-width: 100%; }
 .upd-notes th, .upd-notes td { border: 1px solid var(--hairline); padding: 5px 9px; }
 .upd-notes img { max-width: 100%; height: auto; border-radius: 8px; }
+
+/* ============ 功能扩展(extras.js):斜杠指令 / 每日摘要 / 提示词对照 / 快捷键表 / 收藏 ============ */
+.slash-menu {
+  position: fixed;
+  z-index: 1200;
+  min-width: 240px;
+  max-width: 320px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg-surface, #fff);
+  border: 1px solid var(--hairline, #e5e5ea);
+  border-radius: 14px;
+  box-shadow: var(--shadow-pop, 0 12px 32px rgba(0, 0, 0, 0.14));
+  padding: 6px;
+}
+.slash-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text, #1d1d1f);
+}
+.slash-item:hover, .slash-item.active { background: var(--bg-hover, #f2f2f7); }
+.slash-item .slash-cmd { font-weight: 600; }
+.slash-item .slash-desc { color: var(--text-tertiary, #86868b); font-size: 12px; }
+.digest-card {
+  margin: 0 auto 14px;
+  max-width: min(680px, 100%);
+  background: var(--bg-surface, #fff);
+  border: 1px solid var(--hairline, #e5e5ea);
+  border-radius: 16px;
+  box-shadow: var(--shadow-xs, 0 1px 3px rgba(0, 0, 0, 0.05));
+  padding: 12px 16px;
+  animation: oc-digest-in 0.28s ease;
+}
+@keyframes oc-digest-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.digest-head { display: flex; align-items: center; gap: 7px; }
+.digest-head b { font-size: 13.5px; }
+.digest-head .digest-x { margin-left: auto; }
+.digest-body { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 8px 0 0; font-size: 13px; color: var(--text-secondary, #6e6e73); }
+.digest-chats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.digest-chip {
+  border: 1px solid var(--hairline, #e5e5ea);
+  background: var(--bg-surface-2, #f5f5f7);
+  border-radius: 999px;
+  padding: 3px 11px;
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.digest-chip:hover { background: var(--bg-hover, #ececf1); }
+.ai-diff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.ai-diff-pane {
+  background: var(--bg-surface-2, #f5f5f7);
+  border: 1px solid var(--hairline, #e5e5ea);
+  border-radius: 12px;
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.ai-diff-after { background: color-mix(in srgb, var(--brand, #4f46e5) 7%, var(--bg-surface, #fff)); }
+.oc-shortcut-table { width: 100%; border-collapse: collapse; }
+.oc-shortcut-table td { padding: 7px 6px; font-size: 13px; border-bottom: 1px solid var(--hairline, #ececf1); }
+.oc-shortcut-table tr:last-child td { border-bottom: 0; }
+.oc-shortcut-table kbd {
+  font-family: inherit;
+  background: var(--bg-surface-2, #f5f5f7);
+  border: 1px solid var(--hairline, #e0e0e6);
+  border-radius: 7px;
+  padding: 2px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.oc-fav-content { font-size: 13px; line-height: 1.65; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+#stt-btn.recording { color: var(--danger, #dc2626); animation: oc-stt-pulse 1.2s ease-in-out infinite; }
+@keyframes oc-stt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+.msg-action.active { color: var(--brand, #4f46e5); }
+@media (max-width: 640px) {
+  .ai-diff-grid { grid-template-columns: 1fr; }
+  .slash-menu { left: 10px !important; right: 10px; min-width: 0; }
+}
+
+/* 用量页 14 天趋势条 */
+.usage2-trend { margin-top: 10px; }
+.usage-trend { display: flex; align-items: flex-end; gap: 4px; height: 76px; padding: 4px 2px 0; }
+.usage-trend-col { flex: 1 1 0; display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+.usage-trend-bar {
+  display: block;
+  width: 100%;
+  max-width: 22px;
+  border-radius: 5px 5px 2px 2px;
+  background: var(--brand, #4f46e5);
+  opacity: 0.75;
+  transition: height 0.25s ease;
+}
+.usage-trend-col:hover .usage-trend-bar { opacity: 1; }
+.usage-trend-label { font-size: 9.5px; color: var(--text-tertiary, #86868b); white-space: nowrap; }

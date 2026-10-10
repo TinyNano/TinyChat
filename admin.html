@@ -9,16 +9,16 @@
 <meta name="robots" content="noindex,nofollow">
 <link rel="icon" type="image/svg+xml" href="./logo-icon.svg">
 <link rel="apple-touch-icon" href="./static/logo/app-icon-192.png">
-<link rel="stylesheet" href="./static/css/style.min.css?v=2.0.164">
-<link rel="stylesheet" href="./vendor/highlight/github.min.css?v=2.0.164" id="hljs-theme">
-<link rel="stylesheet" href="./vendor/katex/katex.min.css?v=2.0.164">
-<link rel="stylesheet" href="./static/css/enhanced.min.css?v=2.0.164">
-<link rel="stylesheet" href="./static/css/refine.min.css?v=2.0.164">
-<link rel="stylesheet" href="./static/css/redesign.min.css?v=2.0.164">
-<link rel="stylesheet" href="./static/css/polish.min.css?v=2.0.164">
-<link rel="stylesheet" href="./static/css/markdown.min.css?v=2.0.164">
-<link rel="stylesheet" href="./static/css/chrome.min.css?v=2.0.164">
-<script src="./static/js/theme-boot.min.js?v=2.0.164"></script>
+<link rel="stylesheet" href="./static/css/style.min.css?v=2.1.0">
+<link rel="stylesheet" href="./vendor/highlight/github.min.css?v=2.1.0" id="hljs-theme">
+<link rel="stylesheet" href="./vendor/katex/katex.min.css?v=2.1.0">
+<link rel="stylesheet" href="./static/css/enhanced.min.css?v=2.1.0">
+<link rel="stylesheet" href="./static/css/refine.min.css?v=2.1.0">
+<link rel="stylesheet" href="./static/css/redesign.min.css?v=2.1.0">
+<link rel="stylesheet" href="./static/css/polish.min.css?v=2.1.0">
+<link rel="stylesheet" href="./static/css/markdown.min.css?v=2.1.0">
+<link rel="stylesheet" href="./static/css/chrome.min.css?v=2.1.0">
+<script src="./static/js/theme-boot.min.js?v=2.1.0"></script>
 </head>
 <body class="admin-body">
 <form id="admin-fields" autocomplete="off" style="display:contents">
@@ -727,6 +727,21 @@
           <option value="hard">硬注销（删除全部数据，不可恢复）</option>
         </select>
       </label>
+      <h3>功能与安全</h3>
+      <label class="user-form-admin"><span class="switch"><input type="checkbox" id="memory-enabled" checked><span class="slider"></span></span><span>跨对话记忆（对话后自动提取用户偏好并注入后续对话）</span></label>
+      <label class="user-form-admin"><span class="switch"><input type="checkbox" id="totp-enabled" checked><span class="slider"></span></span><span>两步验证（允许用户在「设置 → 账户」绑定 TOTP 验证器）</span></label>
+      <label class="user-form-admin"><span class="switch"><input type="checkbox" id="login-alert-enabled"><span class="slider"></span></span><span>新设备登录邮件提醒（需已配置 SMTP 且用户填了邮箱）</span></label>
+      <div class="pkg-form-grid">
+        <label class="field"><span>额度预警阈值（剩余次数低于该值时邮件提醒，0 = 关闭）</span><input id="quota-warn-below" type="number" min="0" max="100000" value="0"></label>
+        <label class="field"><span>站点默认主题（新用户或未自选主题的用户生效，用户自选优先）</span>
+          <select id="default-theme-pack">
+            <option value="default">TinyChat 默认</option>
+            <option value="chatgpt">ChatGPT 风格</option>
+            <option value="block">方块</option>
+            <option value="claude">Claude 风格</option>
+          </select>
+        </label>
+      </div>
       <h3>游客体验</h3>
       <p class="muted small" style="margin:0 0 8px">开启后，未登录访客访问首页即可直接对话。每位访客会自动创建一个独立游客账号（命名如「游客A1B2C」并归入「游客」用户组），便于在「用户」列表里单独管理与清理。游客额度在「模型授权」中按游客组控制，轮数在下方设置。</p>
       <label class="user-form-admin"><span class="switch"><input type="checkbox" id="guest-enabled"><span class="slider"></span></span><span>允许游客免登录体验对话</span></label>
@@ -1131,6 +1146,7 @@
         <button class="log-filter-btn active" data-kind="" type="button">全部</button>
         <button class="log-filter-btn" data-kind="chat" type="button">对话</button>
         <button class="log-filter-btn" data-kind="auth" type="button">认证</button>
+        <button class="log-filter-btn" data-kind="audit" type="button">审计</button>
         <button class="log-filter-btn" data-kind="parse" type="button">解析</button>
         <button class="log-filter-btn" data-kind="err" type="button">错误</button>
         <button class="btn small" id="log-refresh" type="button" style="margin-left:auto">↻ 刷新</button>
@@ -1306,17 +1322,17 @@
   </div>
 </div>
 </form>
-<script defer src="./static/js/config.min.js?v=2.0.164"></script>
-<script defer src="./static/js/icons.min.js?v=2.0.164"></script>
-<script defer src="./vendor/markdown-it/markdown-it.min.js?v=2.0.164"></script>
-<script defer src="./vendor/markdown-it/markdown-it-footnote.min.js?v=2.0.164"></script>
-<script defer src="./vendor/markdown-it/markdown-it-emoji.min.js?v=2.0.164"></script>
-<script defer src="./vendor/dompurify/purify.min.js?v=2.0.164"></script>
-<script defer src="./vendor/katex/katex.min.js?v=2.0.164"></script>
-<script defer src="./vendor/highlight/highlight.min.js?v=2.0.164"></script>
-<script defer src="./static/js/ui.min.js?v=2.0.164"></script>
-<script defer src="./static/js/components.min.js?v=2.0.164"></script>
-<script defer src="./static/js/renderer.min.js?v=2.0.164"></script>
-<script defer src="./static/js/admin.min.js?v=2.0.164"></script>
+<script defer src="./static/js/config.min.js?v=2.1.0"></script>
+<script defer src="./static/js/icons.min.js?v=2.1.0"></script>
+<script defer src="./vendor/markdown-it/markdown-it.min.js?v=2.1.0"></script>
+<script defer src="./vendor/markdown-it/markdown-it-footnote.min.js?v=2.1.0"></script>
+<script defer src="./vendor/markdown-it/markdown-it-emoji.min.js?v=2.1.0"></script>
+<script defer src="./vendor/dompurify/purify.min.js?v=2.1.0"></script>
+<script defer src="./vendor/katex/katex.min.js?v=2.1.0"></script>
+<script defer src="./vendor/highlight/highlight.min.js?v=2.1.0"></script>
+<script defer src="./static/js/ui.min.js?v=2.1.0"></script>
+<script defer src="./static/js/components.min.js?v=2.1.0"></script>
+<script defer src="./static/js/renderer.min.js?v=2.1.0"></script>
+<script defer src="./static/js/admin.min.js?v=2.1.0"></script>
 </body>
 </html>

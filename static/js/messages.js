@@ -43,9 +43,12 @@
     const ic = window.OC && window.OC.icon;
     bar.innerHTML =
       '<button class="msg-action" data-act="copy" data-tip="复制消息">' + ic('copy', 14) + '</button>'
+      + '<button class="msg-action" data-act="fav" data-tip="收藏此回复" aria-label="收藏此回复">' + ic('star', 14) + '</button>'
+      + '<button class="msg-action" data-act="speak" data-tip="朗读此回复" aria-label="朗读此回复">' + ic('volume', 14) + '</button>'
       + '<button class="msg-action" data-act="like" data-tip="点赞" data-vote="up">' + ic('like', 14) + '</button>'
       + '<button class="msg-action" data-act="dislike" data-tip="点踩" data-vote="down">' + ic('dislike', 14) + '</button>'
       + '<button class="msg-action" data-act="regenerate" data-tip="重新生成">' + ic('refresh', 14) + '</button>'
+      + '<button class="msg-action" data-act="continue" data-tip="回复被截断，从这里继续生成">' + ic('redo', 14) + '</button>'
       + '<button class="msg-action" data-act="at" data-tip="@ 其他模型重新回答" aria-label="@ 其他模型重新回答"><span class="at-glyph">@</span></button>'
       + '<button class="msg-action" data-act="share" data-tip="分享对话">' + ic('share', 14) + '</button>'
       + '<button class="msg-action" data-act="note" data-tip="让 AI 整理并保存到笔记" aria-label="让 AI 整理并保存到笔记">' + ic('noteSave', 14) + '</button>'
@@ -63,6 +66,15 @@
     const isAssistant = msgEl.classList.contains('assistant');
     const isUser = msgEl.classList.contains('user');
     bar.querySelector('[data-act="regenerate"]').style.display = isAssistant ? '' : 'none';
+    const contBtn = bar.querySelector('[data-act="continue"]');
+    if (contBtn) contBtn.style.display = (isAssistant && msg.finishReason === 'length' && hooks.onContinue) ? '' : 'none';
+    const favBtn = bar.querySelector('[data-act="fav"]');
+    if (favBtn) {
+      favBtn.style.display = isAssistant && hooks.onFav ? '' : 'none';
+      favBtn.classList.toggle('active', !!msg._faved);
+    }
+    const speakBtn = bar.querySelector('[data-act="speak"]');
+    if (speakBtn) speakBtn.style.display = isAssistant && hooks.onSpeak ? '' : 'none';
     const atBtn = bar.querySelector('[data-act="at"]');
     // @ 其他模型重答仅用于简单对话;群聊成员已绑定模型,不显示
     if (atBtn) atBtn.style.display = isAssistant && hooks.onAt && !msg.participant ? '' : 'none';
@@ -120,6 +132,15 @@
         if (hooks.onVote) hooks.onVote(msg);
       } else if (act === 'regenerate') {
         if (hooks.onRegenerate) hooks.onRegenerate(msg);
+      } else if (act === 'continue') {
+        if (hooks.onContinue) hooks.onContinue(msg);
+      } else if (act === 'fav') {
+        // 收藏开关:按钮态由 hooks.onFav 的返回/回调驱动(这里先做乐观翻转)
+        const willFav = !msg._faved;
+        btn.classList.toggle('active', willFav);
+        if (hooks.onFav) hooks.onFav(msg, btn, willFav);
+      } else if (act === 'speak') {
+        if (hooks.onSpeak) hooks.onSpeak(msg, btn);
       } else if (act === 'at') {
         if (hooks.onAt) hooks.onAt(msg, btn);
       } else if (act === 'share') {

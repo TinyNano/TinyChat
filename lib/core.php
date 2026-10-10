@@ -6,7 +6,7 @@ if (!defined('TC_ROOT')) {
     define('TC_ROOT', dirname(__DIR__));
 }
 
-define('TC_VERSION', '2.0.164');
+define('TC_VERSION', '2.1.0');
 // 单篇笔记正文上限(字符)。超出时接口明确报错而不是静默截断。
 define('TC_NOTE_MAX_CHARS', 500000);
 // 敏感词库上限(去重后的条数)。达到上限后新增词条被丢弃,单个词条本身不截断。
@@ -94,6 +94,37 @@ function tc_mail_default_templates() {
             '重置密码',
             '链接 {expires} 内有效。'
         ),
+        // 登录提醒:没有链接可点,正文是一张设备/时间/IP 明细卡(占位符 {time} {device} {ip} 由发送方填)
+        'loginAlertSubject' => '{siteName} 账号在新设备登录',
+        'loginAlertHtml' => '<!DOCTYPE html>'
+            . '<html lang="zh-CN"><body style="margin:0;padding:0;background:#eef1f6;">'
+            . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#eef1f6;padding:36px 16px;">'
+            . '<tr><td align="center">'
+            . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:560px;">'
+            . '<tr><td style="background:#ffffff;border-radius:18px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',\'PingFang SC\',\'Hiragino Sans GB\',\'Microsoft YaHei\',Helvetica,Arial,sans-serif;">'
+            . '<div style="height:5px;background:#f59e0b;line-height:5px;font-size:0;">&nbsp;</div>'
+            . '<div style="padding:34px 40px 0;">'
+            . '<span style="display:inline-block;padding:5px 12px;border-radius:999px;background:#fffbeb;color:#b45309;font-size:12px;font-weight:600;letter-spacing:0.5px;">{siteName}</span>'
+            . '<h1 style="margin:18px 0 0;font-size:21px;line-height:1.4;color:#0f172a;font-weight:700;">新设备登录提醒</h1>'
+            . '<div style="margin:14px 0 0;font-size:14px;line-height:1.85;color:#475569;">'
+            . '<p style="margin:0;">你好，<b style="color:#0f172a;">{name}</b>：</p>'
+            . '<p style="margin:10px 0 0;">你的 {siteName} 账号刚在一台不常用的设备上登录成功。如果不是你本人操作，请立即修改密码。</p>'
+            . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0 0;background:#f8fafc;border-radius:12px;">'
+            . '<tr><td style="padding:14px 18px;font-size:13px;line-height:2;color:#475569;">'
+            . '登录时间：{time}<br>设备：{device}<br>IP 地址：{ip}'
+            . '</td></tr></table>'
+            . '</div>'
+            . '</div>'
+            . '<div style="padding:22px 40px 0;">'
+            . '<p style="margin:0;font-size:12.5px;line-height:1.8;color:#94a3b8;">同一台常用设备重复登录不会触发这封提醒。</p>'
+            . '</div>'
+            . '<div style="padding:26px 40px 30px;">'
+            . '<div style="height:1px;background:#e8ecf3;line-height:1px;font-size:0;">&nbsp;</div>'
+            . '<p style="margin:14px 0 0;font-size:12px;color:#b6c0cf;text-align:center;">此邮件由 {siteName} 系统发送，请勿直接回复</p>'
+            . '</div>'
+            . '</td></tr></table>'
+            . '</td></tr></table>'
+            . '</body></html>',
     );
 }
 
@@ -335,6 +366,24 @@ $TC_SETTINGS_DEFAULTS = array(
     // 存的是用户自己写的 HTML,打开时在**不透明源**的沙箱里运行,读不到本站登录态;
     // 数量与体积上限见 TC_TOOLBOX_MAX_* 常量。
     'toolboxEnabled' => true,
+    // ---- 跨对话记忆 ----
+    // 总开关:关闭后服务端不再把记忆注入对话,前台也不再做自动提取(手动添加的条目保留但不生效)
+    'memoryEnabled' => true,
+    // 单用户记忆条数上限(超出后新增会挤掉最旧的一条)
+    'memoryMaxCount' => 50,
+    // ---- 两步验证(TOTP) ----
+    // 允许用户在「设置 → 账号」里开启 TOTP 两步验证(关闭只影响新开启,已开启者不受影响)
+    'totpEnabled' => true,
+    // ---- 新设备登录提醒 ----
+    // 登录成功且设备指纹(UA)与上次不同时,发一封提醒邮件(需已配置 SMTP 与用户邮箱)
+    'loginAlertEnabled' => false,
+    // ---- 额度预警 ----
+    // 用户剩余额度(次数)低于该值时发一封提醒邮件,0 = 关闭;同一用户 24 小时内最多提醒一次
+    'quotaWarnBelow' => 0,
+    // ---- 站点默认主题 ----
+    // 新用户 / 从未自选过主题的用户应用哪套主题包(default/chatgpt/block/claude);
+    // 用户一旦自己选过主题,以后都以用户的选择为准
+    'defaultThemePack' => 'default',
 );
 $TC_SETTINGS_DEFAULTS['mailTemplates'] = tc_mail_default_templates();
 // 三个拓展功能的访问级别(全站 / 仅管理员 / 仅名单)与名单
@@ -1656,6 +1705,15 @@ function tc_normalize_settings($raw) {
     // 注销模式:仅接受 off/soft/hard,其余一律回落软注销(默认值)
     $adMode = isset($s['accountDeletionMode']) ? (string) $s['accountDeletionMode'] : 'soft';
     $s['accountDeletionMode'] = in_array($adMode, array('off', 'soft', 'hard'), true) ? $adMode : 'soft';
+    // 跨对话记忆:默认开启;条数上限钳制在 1~200
+    $s['memoryEnabled'] = !array_key_exists('memoryEnabled', $s) || !empty($s['memoryEnabled']);
+    $s['memoryMaxCount'] = min(200, max(1, (int) (isset($s['memoryMaxCount']) ? $s['memoryMaxCount'] : $TC_SETTINGS_DEFAULTS['memoryMaxCount']) ?: $TC_SETTINGS_DEFAULTS['memoryMaxCount']));
+    // 两步验证 / 登录提醒 / 额度预警 / 站点默认主题
+    $s['totpEnabled'] = !array_key_exists('totpEnabled', $s) || !empty($s['totpEnabled']);
+    $s['loginAlertEnabled'] = !empty($s['loginAlertEnabled']);
+    $s['quotaWarnBelow'] = min(100000, max(0, (int) (isset($s['quotaWarnBelow']) ? $s['quotaWarnBelow'] : 0)));
+    $pack = strtolower(trim((string) (isset($s['defaultThemePack']) ? $s['defaultThemePack'] : 'default')));
+    $s['defaultThemePack'] = in_array($pack, array('default', 'chatgpt', 'block', 'claude'), true) ? $pack : 'default';
     return $s;
 }
 
@@ -1877,6 +1935,9 @@ function tc_empty_db() {
         'userToolbox' => new stdClass(),
         // 工具箱文档乐观并发修订号:{userId: int},语义与 userNoteRevisions 一致
         'userToolboxRevisions' => new stdClass(),
+        // 笔记云端版本历史:按用户拆成 ntv:{uid} 行,值为 {noteId: [{t,c}]}
+        // (c 为截断后的正文快照,每笔记最多留 5 份),换设备也能回溯历史版本
+        'userNoteVersions' => new stdClass(),
         // 系统工具箱(所有人共用、由后台维护的那份):{cats:[{id,name}], items:[{id,cat,title,html,...}]}。
         // 量小(10 套内置工具约 30KB),不按用户拆行,整键一行存,与 assistants 等同类。
         // null 表示「还没种过」,由 tc_seed_system_toolbox 在首次运行时填入内置内容;
@@ -1911,6 +1972,10 @@ function tc_empty_db() {
         'imThreads' => new stdClass(),
         // 好友关系与好友请求:按用户拆成 friend:{uid} 行,值为 {friends:[], reqs:[]}
         'userFriends' => new stdClass(),
+        // 跨对话记忆:按用户拆,值为 {items:[{id,content,createdAt,source}]},source=manual/auto
+        'userMemories' => new stdClass(),
+        // 消息收藏夹:按用户拆,值为 {items:[{id,chatId,chatTitle,msgId,model,content,createdAt}]}
+        'userFavorites' => new stdClass(),
         // IM 已读游标:按用户拆成 imst:{uid} 行,值为 {lastRead:{threadId: msgId}}
         'userImState' => new stdClass(),
         // 会话消息:按会话拆成 immsg:{threadId} 行(与 note:{uid} 同一套省写放大机制),
@@ -2870,6 +2935,7 @@ function tc_db_load_with_baseline($pdo) {
     $origMsgs = array();
     $origArch = array();
     $origToolbox = array();
+    $origNtv = array();
     $rows = $pdo->query('SELECT k, v FROM store')->fetchAll();
     foreach ($rows as $row) {
         $k = (string) $row['k'];
@@ -2930,12 +2996,20 @@ function tc_db_load_with_baseline($pdo) {
             }
             continue;
         }
+        if (strncmp($k, 'ntv:', 4) === 0) {
+            $origNtv[substr($k, 4)] = $raw;
+            $val = json_decode($raw, true);
+            if (is_array($val)) {
+                $db['userNoteVersions']->{substr($k, 4)} = $val;
+            }
+            continue;
+        }
         $orig[$k] = $raw;
         $val = json_decode($raw, true);
         if ($val === null && $raw !== 'null') continue;
         $db[$k] = $val;
     }
-    return array(tc_migrate_db($db), $orig, $origChats, $origDeleted, $origNotes, $origSettings, $origMsgs, $origArch, $origToolbox);
+    return array(tc_migrate_db($db), $orig, $origChats, $origDeleted, $origNotes, $origSettings, $origMsgs, $origArch, $origToolbox, $origNtv);
 }
 
 // 整库快照写入(迁移导入 / 恢复备份用):清空后按顶层键落行
@@ -2973,6 +3047,12 @@ function tc_db_write_snapshot($pdo, $db) {
             }
             continue;
         }
+        if ($k === 'userNoteVersions') {
+            foreach (tc_assoc($v) as $uid => $row) {
+                $ins->execute(array(':k' => 'ntv:' . $uid, ':v' => tc_json_encode($row)));
+            }
+            continue;
+        }
         if ($k === 'imMessages') {
             foreach (tc_assoc($v) as $tid => $row) {
                 $ins->execute(array(':k' => 'immsg:' . $tid, ':v' => tc_json_encode($row)));
@@ -3004,8 +3084,9 @@ function tc_with_db($write, $fn) {
     if ($write) $pdo->exec('BEGIN IMMEDIATE');
     $db = null;
     $orig = $origChats = $origDeleted = $origNotes = $origSettings = $origMsgs = $origArch = $origToolbox = array();
+    $origNtv = array();
     try {
-        list($db, $orig, $origChats, $origDeleted, $origNotes, $origSettings, $origMsgs, $origArch, $origToolbox) = tc_db_load_with_baseline($pdo);
+        list($db, $orig, $origChats, $origDeleted, $origNotes, $origSettings, $origMsgs, $origArch, $origToolbox, $origNtv) = tc_db_load_with_baseline($pdo);
     } catch (Throwable $e) {
         if ($write) { try { $pdo->exec('ROLLBACK'); } catch (Throwable $e2) {} }
         throw $e;
@@ -3021,6 +3102,7 @@ function tc_with_db($write, $fn) {
         'orig' => $orig, 'origChats' => $origChats, 'origDeleted' => $origDeleted,
         'origNotes' => $origNotes, 'origSettings' => $origSettings,
         'origMsgs' => $origMsgs, 'origArch' => $origArch, 'origToolbox' => $origToolbox,
+        'origNtv' => $origNtv,
     );
     try {
         $ret = $fn($db);
@@ -3066,6 +3148,7 @@ function tc_db_commit() {
         $newNotes = tc_assoc(isset($db['userNotes']) ? $db['userNotes'] : null);
         $newSettings = tc_assoc(isset($db['userSettings']) ? $db['userSettings'] : null);
         $newToolbox = tc_assoc(isset($db['userToolbox']) ? $db['userToolbox'] : null);
+        $newNtv = tc_assoc(isset($db['userNoteVersions']) ? $db['userNoteVersions'] : null);
         $newMsgs = tc_assoc(isset($db['imMessages']) ? $db['imMessages'] : null);
         $newArch = tc_assoc(isset($db['imDeleted']) ? $db['imDeleted'] : null);
         $origDeleted = isset($ctx['origDeleted']) ? $ctx['origDeleted'] : array();
@@ -3127,6 +3210,17 @@ function tc_db_commit() {
                 }
                 foreach ($origToolbox as $uid => $json) {
                     if (!array_key_exists($uid, $newToolbox)) $del->execute(array(':k' => 'tbox:' . $uid));
+                }
+                continue;
+            }
+            if ($k === 'userNoteVersions') {
+                foreach ($newNtv as $uid => $row) {
+                    $json = tc_json_encode($row);
+                    if (isset($ctx['origNtv'][$uid]) && $ctx['origNtv'][$uid] === $json) continue;
+                    $ups->execute(array(':k' => 'ntv:' . $uid, ':v' => $json, ':v2' => $json));
+                }
+                foreach ((isset($ctx['origNtv']) ? $ctx['origNtv'] : array()) as $uid => $json) {
+                    if (!array_key_exists($uid, $newNtv)) $del->execute(array(':k' => 'ntv:' . $uid));
                 }
                 continue;
             }
@@ -3489,6 +3583,8 @@ function tc_sanitize_user($u) {
         'groupId' => isset($u['groupId']) ? $u['groupId'] : null,
         // 是否已设密码:第三方登录建号的用户为 false,前端据此隐藏「当前密码」并允许直接设置
         'hasPassword' => isset($u['passwordHash']) && (string) $u['passwordHash'] !== '',
+        // 是否已开启两步验证(TOTP):只下发布尔,密钥本身永不离开服务端
+        'totpOn' => !empty($u['totpSecret']),
     );
 }
 
@@ -4450,6 +4546,7 @@ function tc_quota_settle(&$db, $userId, $actualCost, $model = '', $purpose = '')
                 'after' => $after,
             ));
         }
+        tc_quota_warn_check($db, $db['users'][$i]);
         return $actual;
     }
     return $actual;
@@ -4474,6 +4571,7 @@ function tc_charge_user(&$db, &$user, $cost, $model = '', $purpose = '') {
             'before' => round($before, 4),
             'after' => round((float) $user['quota'], 4),
         ));
+        tc_quota_warn_check($db, $user);
     }
     tc_charge_user_stats($db, $user, $model, $purpose);
     return $unlimited ? 0 : $n;
@@ -4764,4 +4862,251 @@ function tc_catalog() {
     $j = json_decode((string) file_get_contents($file), true);
     $cat = is_array($j) ? $j : array('categories' => array(), 'assistants' => array(), 'DEFAULT_ASSISTANT_ID' => 'as-present');
     return $cat;
+}
+
+// ============================================================
+// TOTP 两步验证(RFC 6238)。只依赖 hash_hmac 与 hash_equals,无需扩展;
+// 密钥为 Base32(RFC 4648)编码,6 位数字 / 30 秒步长 / SHA1,兼容 Google
+// Authenticator、Microsoft Authenticator、1Password 等主流验证器。
+// ============================================================
+
+const TC_TOTP_B32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+function tc_totp_generate_secret($bytes = 20) {
+    $raw = random_bytes(max(10, min(64, (int) $bytes)));
+    $out = '';
+    $bits = 0;
+    $acc = 0;
+    for ($i = 0, $n = strlen($raw); $i < $n; $i++) {
+        $acc = ($acc << 8) | ord($raw[$i]);
+        $bits += 8;
+        while ($bits >= 5) {
+            $bits -= 5;
+            $out .= TC_TOTP_B32_ALPHABET[($acc >> $bits) & 31];
+        }
+    }
+    if ($bits > 0) $out .= TC_TOTP_B32_ALPHABET[($acc << (5 - $bits)) & 31];
+    return $out;
+}
+
+function tc_b32_decode($s) {
+    $s = strtoupper(preg_replace('/[^A-Za-z2-7]/', '', (string) $s));
+    $bits = 0;
+    $acc = 0;
+    $out = '';
+    for ($i = 0, $n = strlen($s); $i < $n; $i++) {
+        $pos = strpos(TC_TOTP_B32_ALPHABET, $s[$i]);
+        if ($pos === false) return '';
+        $acc = ($acc << 5) | $pos;
+        $bits += 5;
+        if ($bits >= 8) {
+            $bits -= 8;
+            $out .= chr(($acc >> $bits) & 0xFF);
+        }
+    }
+    return $out;
+}
+
+function tc_totp_code($secret, $counter) {
+    $key = tc_b32_decode($secret);
+    if ($key === '') return '';
+    $bin = pack('N', 0) . pack('N', $counter & 0xFFFFFFFF);
+    $h = hash_hmac('sha1', $bin, $key, true);
+    $off = ord($h[strlen($h) - 1]) & 0x0F;
+    $v = ((ord($h[$off]) & 0x7F) << 24) | ((ord($h[$off + 1]) & 0xFF) << 16) | ((ord($h[$off + 2]) & 0xFF) << 8) | (ord($h[$off + 3]) & 0xFF);
+    return str_pad((string) ($v % 1000000), 6, '0', STR_PAD_LEFT);
+}
+
+// 校验一次性验证码:允许前后各 1 个时间窗(约 ±30 秒),常数时间比较
+function tc_totp_verify($secret, $code, $window = 1) {
+    $code = preg_replace('/[^0-9]/', '', (string) $code);
+    if (strlen($code) !== 6 || trim((string) $secret) === '') return false;
+    $t = intdiv(time(), 30);
+    for ($i = -$window; $i <= $window; $i++) {
+        $want = tc_totp_code($secret, $t + $i);
+        if ($want !== '' && hash_equals($want, $code)) return true;
+    }
+    return false;
+}
+
+// 验证器 App 扫码用的 otpauth:// URI
+function tc_totp_uri($secret, $account, $issuer) {
+    return 'otpauth://totp/' . rawurlencode($issuer . ':' . $account)
+        . '?secret=' . rawurlencode($secret)
+        . '&issuer=' . rawurlencode($issuer)
+        . '&algorithm=SHA1&digits=6&period=30';
+}
+
+// ============================================================
+// 提醒类邮件队列。注册验证/重置密码等「用户主动等待结果」的邮件沿用事务内直发;
+// 登录提醒、额度预警这类「锦上添花」的邮件不入事务:结算/登录路径里只把一封
+// JSON 落到 data/mailq/,由入口引导 tick(约 5 分钟一跳,tc_mailq_maybe_drain)
+// 在事务外统一投递。SMTP 卡死不会阻塞任何写事务,站点重启也不丢邮件。
+// ============================================================
+
+function tc_mailq_dir() {
+    $d = tc_data_dir() . '/mailq';
+    if (!is_dir($d)) @mkdir($d, 0775, true);
+    return $d;
+}
+
+function tc_mailq_enqueue($to, $subject, $html, $text = '') {
+    $to = trim((string) $to);
+    if ($to === '' || strpos($to, '@') === false) return false;
+    $item = array('to' => $to, 'subject' => (string) $subject, 'html' => (string) $html, 'text' => (string) $text, 'tries' => 0, 't' => tc_now());
+    $name = gmdate('Ymd', (int) (tc_now() / 1000)) . '-' . bin2hex(random_bytes(4)) . '.json';
+    return @file_put_contents(tc_mailq_dir() . '/' . $name, tc_json_encode($item), LOCK_EX) !== false;
+}
+
+// 投递队列(最多 $limit 封/次):失败把 tries+1 留待下轮,超过 3 次改为 .failed 后缀停止重试。
+// 内部用标记文件限频:最快 60 秒一跳,避免每个请求都 glob 一遍目录。
+function tc_mailq_maybe_drain($limit = 2) {
+    try {
+        $mark = tc_mailq_dir() . '/.last-drain';
+        $now = tc_now();
+        $j = json_decode((string) @file_get_contents($mark), true);
+        if (is_array($j) && $now - (int) (isset($j['t']) ? $j['t'] : 0) < 60 * 1000) return;
+        @file_put_contents($mark, tc_json_encode(array('t' => $now)), LOCK_EX);
+        tc_with_db(false, function ($db) use ($limit) {
+            $s = $db['settings'];
+            if (empty($s['smtp']['host'])) return;
+            $files = glob(tc_mailq_dir() . '/*.json');
+            if (!$files) return;
+            sort($files);
+            $sent = 0;
+            foreach ($files as $f) {
+                if ($sent >= $limit) break;
+                $item = json_decode((string) @file_get_contents($f), true);
+                if (!is_array($item) || empty($item['to'])) { @unlink($f); continue; }
+                $tries = isset($item['tries']) ? (int) $item['tries'] : 0;
+                $err = '';
+                $ok = tc_mail_send($s, (string) $item['to'], (string) $item['subject'], (string) (isset($item['html']) ? $item['html'] : ''), (string) (isset($item['text']) ? $item['text'] : ''), $err);
+                if ($ok) {
+                    @unlink($f);
+                    $sent++;
+                    continue;
+                }
+                $item['tries'] = $tries + 1;
+                $item['lastErr'] = tc_log_clip((string) $err, 300);
+                if ($item['tries'] >= 3) {
+                    @rename($f, $f . '.failed');
+                } else {
+                    @file_put_contents($f, tc_json_encode($item), LOCK_EX);
+                }
+            }
+        });
+    } catch (Throwable $e) {
+        // 队列投递失败不影响主请求
+    }
+}
+
+// shutdown 阶段的队列投递入口:能断开请求连接的 SAPI(FPM)先把响应交还用户
+function tc_mailq_shutdown_drain() {
+    if (function_exists('fastcgi_finish_request')) {
+        @fastcgi_finish_request();
+    }
+    tc_mailq_maybe_drain();
+}
+
+// ============================================================
+// 管理员操作审计:与请求日志共用一份 NDJSON,kind=audit,后台「日志」可按类型筛选。
+// 只记「谁在什么时候做了什么管理动作」,不记业务数据本身(detail 里只放摘要)。
+// ============================================================
+
+function tc_audit($user, $action, $detail = '') {
+    $u = is_array($user) ? $user : array();
+    tc_push_log(array(
+        'kind' => 'audit',
+        'userId' => isset($u['id']) ? (string) $u['id'] : '',
+        'userName' => isset($u['name']) ? (string) $u['name'] : '',
+        'action' => (string) $action,
+        'detail' => tc_log_clip((string) $detail, 2000),
+        'ip' => tc_client_ip(),
+    ));
+}
+
+// ============================================================
+// 跨对话记忆:顶层键 userMemories = {uid: {items:[{id,content,createdAt,source}]}}。
+// 量小(上限几十条、每条数百字),走整键一行存的通用 diff,与 userFriends 同款。
+// ============================================================
+
+function tc_memories_of(&$db, $uid) {
+    $map = tc_assoc(isset($db['userMemories']) ? $db['userMemories'] : null);
+    $db['userMemories'] = tc_object_map($map);
+    $doc = isset($map[$uid]) && is_array($map[$uid]) ? $map[$uid] : array();
+    if (!isset($doc['items']) || !is_array($doc['items'])) $doc['items'] = array();
+    return $doc;
+}
+
+function tc_memories_put(&$db, $uid, $doc) {
+    $map = tc_assoc(isset($db['userMemories']) ? $db['userMemories'] : null);
+    $map[$uid] = $doc;
+    $db['userMemories'] = tc_object_map($map);
+}
+
+// 拼成注入 system prompt 的文本;超长时按顺序截断,保证总注入量可控
+function tc_memories_prompt_text($items, $maxBytes = 2400) {
+    $lines = array();
+    $total = 0;
+    foreach ((array) $items as $it) {
+        $c = trim((string) (isset($it['content']) ? $it['content'] : ''));
+        if ($c === '') continue;
+        $len = strlen($c);
+        if ($total + $len > $maxBytes) break;
+        $lines[] = '- ' . $c;
+        $total += $len;
+    }
+    if (!$lines) return '';
+    return "以下是关于该用户的长期记忆,供个性化回应时参考。记忆可能过时或不准确,与用户当前请求冲突时一律以当前请求为准:\n" . implode("\n", $lines);
+}
+
+// ============================================================
+// 消息收藏夹:顶层键 userFavorites = {uid: {items:[...]}}。上限 TC_FAVORITES_CAP。
+// ============================================================
+
+const TC_FAVORITES_CAP = 200;
+
+function tc_favorites_of(&$db, $uid) {
+    $map = tc_assoc(isset($db['userFavorites']) ? $db['userFavorites'] : null);
+    $db['userFavorites'] = tc_object_map($map);
+    $doc = isset($map[$uid]) && is_array($map[$uid]) ? $map[$uid] : array();
+    if (!isset($doc['items']) || !is_array($doc['items'])) $doc['items'] = array();
+    return $doc;
+}
+
+function tc_favorites_put(&$db, $uid, $doc) {
+    $map = tc_assoc(isset($db['userFavorites']) ? $db['userFavorites'] : null);
+    $map[$uid] = $doc;
+    $db['userFavorites'] = tc_object_map($map);
+}
+
+// ============================================================
+// 额度预警:结算扣费后检查剩余额度,低于阈值(设置 quotaWarnBelow,次数)时
+// 往邮件队列塞一封提醒。同一用户 24 小时最多触发一次(用户记录上盖 quotaWarnAt)。
+// 在写事务里调用安全:只改用户字段 + 落一个队列文件,不发 SMTP。
+// ============================================================
+
+function tc_quota_warn_check(&$db, &$user) {
+    $s = isset($db['settings']) && is_array($db['settings']) ? $db['settings'] : array();
+    $below = isset($s['quotaWarnBelow']) ? (float) $s['quotaWarnBelow'] : 0;
+    if ($below <= 0) return;
+    if (tc_is_unlimited_quota($user)) return;
+    $email = trim((string) (isset($user['email']) ? $user['email'] : ''));
+    if ($email === '' || strpos($email, '@') === false) return;
+    $remaining = (float) tc_quota_effective($user);
+    if ($remaining >= $below) return;
+    $now = tc_now();
+    if ($now - (int) (isset($user['quotaWarnAt']) ? $user['quotaWarnAt'] : 0) < 24 * 3600 * 1000) return;
+    $user['quotaWarnAt'] = $now;
+    $site = (string) (isset($s['siteName']) ? $s['siteName'] : 'TinyChat');
+    $html = '<!DOCTYPE html><html lang="zh-CN"><body style="margin:0;background:#eef1f6;">'
+        . '<div style="max-width:560px;margin:0 auto;padding:36px 16px;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',\'PingFang SC\',\'Microsoft YaHei\',sans-serif;">'
+        . '<div style="background:#ffffff;border-radius:18px;padding:34px 40px 30px;">'
+        . '<span style="display:inline-block;padding:5px 12px;border-radius:999px;background:#fffbeb;color:#b45309;font-size:12px;font-weight:600;">' . htmlspecialchars($site, ENT_QUOTES, 'UTF-8') . '</span>'
+        . '<h1 style="margin:18px 0 0;font-size:21px;color:#0f172a;">额度不足提醒</h1>'
+        . '<p style="margin:14px 0 0;font-size:14px;line-height:1.85;color:#475569;">你好，<b style="color:#0f172a;">' . htmlspecialchars((string) (isset($user['name']) ? $user['name'] : ''), ENT_QUOTES, 'UTF-8') . '：</p>'
+        . '<p style="margin:10px 0 0;font-size:14px;line-height:1.85;color:#475569;">你的剩余额度已低于 ' . htmlspecialchars((string) $below, ENT_QUOTES, 'UTF-8') . ' 次（当前约剩 ' . htmlspecialchars((string) round($remaining, 2), ENT_QUOTES, 'UTF-8') . ' 次）。可在站点登录后兑换额度包或联系管理员补充。</p>'
+        . '<p style="margin:16px 0 0;font-size:12.5px;line-height:1.8;color:#94a3b8;">提醒 24 小时内最多发送一次；若额度已补足，后续不会再提醒。</p>'
+        . '</div></div></body></html>';
+    tc_mailq_enqueue($email, $site . ' - 额度不足提醒', $html);
 }

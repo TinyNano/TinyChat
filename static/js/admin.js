@@ -2881,16 +2881,17 @@ async function loadLogs() {
     // 无 HTTP 状态的条目(认证/邮件/管理等)不显示「连接失败」,统一按结果给「成功/失败」
     const statusText = l.error ? '失败' : (hasStatus ? String(status) : (l.status === 0 ? '连接失败' : '成功'));
     const badge = l.kind === 'auth' ? '<span class="log-badge auth">认证</span>'
+      : (l.kind === 'audit' ? '<span class="log-badge auth">审计</span>'
       : (l.kind === 'parse' ? '<span class="log-badge chat">解析</span>'
       : (l.kind === 'mail' ? '<span class="log-badge auth">邮件</span>'
       : (l.kind === 'admin' ? '<span class="log-badge auth">管理</span>'
-      : (status >= 400 || l.error ? '<span class="log-badge err">错误</span>' : '<span class="log-badge chat">对话</span>'))));
+      : (status >= 400 || l.error ? '<span class="log-badge err">错误</span>' : '<span class="log-badge chat">对话</span>')))));
     // l.ms 是服务端数值字段;title 属性里不加转义的话,数值一旦变成字符串就成了属性注入入口
     const ms = l.ms !== undefined ? '<span title="' + escapeHtml(String(l.ms)) + 'ms">' + (l.ms >= 1000 ? (l.ms / 1000).toFixed(1) + 's' : l.ms + 'ms') + '</span>' : '-';
     // 信息列:失败原因 / 解析摘要(note) / 认证动作(action)
     const infoMsg = l.error || l.note || l.action || '';
     // 完整内容:提示词 / 模型回复 / 用量 / 来源 IP;点小眼睛展开查看
-    const hasDetail = !!(l.prompt || l.reply || l.usage || l.ip);
+    const hasDetail = !!(l.prompt || l.reply || l.usage || l.ip || l.detail);
     let contentCell = '-';
     if (hasDetail) {
       const usage = l.usage && (l.usage.prompt || l.usage.completion)
@@ -2899,6 +2900,7 @@ async function loadLogs() {
       const detail = [
         l.ip ? '来源 IP：' + l.ip : '',
         l.action ? '动作：' + l.action : '',
+        l.detail ? '详情：' + l.detail : '',
         usage,
         l.prompt ? '【提示词】\n' + l.prompt : '',
         l.reply ? '【模型回复】\n' + l.reply : '',
@@ -3540,6 +3542,12 @@ async function loadVerifySettings() {
   set('register-limit', s.registerLimitPerHour || 5);
   if ($('user-providers-allowed')) $('user-providers-allowed').checked = s.allowUserProviders !== false;
   set('account-deletion-mode', s.accountDeletionMode || 'soft');
+  // 功能与安全:记忆 / TOTP / 登录提醒 / 额度预警 / 站点默认主题
+  if ($('memory-enabled')) $('memory-enabled').checked = s.memoryEnabled !== false;
+  if ($('totp-enabled')) $('totp-enabled').checked = s.totpEnabled !== false;
+  if ($('login-alert-enabled')) $('login-alert-enabled').checked = !!s.loginAlertEnabled;
+  set('quota-warn-below', s.quotaWarnBelow != null ? s.quotaWarnBelow : 0);
+  set('default-theme-pack', s.defaultThemePack || 'default');
   set('login-max-fails', s.loginMaxFails != null ? s.loginMaxFails : 5);
   set('login-lock-sec', s.loginLockMs != null ? Math.round(s.loginLockMs / 1000) : 60);
   const tpl = s.mailTemplates || {};
@@ -3951,7 +3959,7 @@ async function loadPackages() {
     if (!VERIFY_LOADED) { toast('验证设置尚未加载完成，已取消保存', true); return; }
     const old=save.textContent; save.disabled=true; save.textContent='保存中…';
     try {
-    const tplPayload=MAIL_TPL.loaded?{mailTemplates:{tplVersion:2,verifySubject:MAIL_TPL.tpl.verify.subject,verifyHtml:MAIL_TPL.tpl.verify.html,resetSubject:MAIL_TPL.tpl.reset.subject,resetHtml:MAIL_TPL.tpl.reset.html}}:{}; const payload=Object.assign({emailVerificationEnabled:!!$('verify-email-enabled').checked,passwordResetEnabled:!!$('verify-reset-enabled').checked,freeQuotaUnlimited:!!$('verify-quota-unlimited').checked,freeQuota:parseInt($('verify-free-quota').value,10)||0,sessionDays:Math.min(30,Math.max(1,parseInt($('session-days')&&$('session-days').value,10)||7)),apiKeysEnabled:!!($('apikeys-enabled')&&$('apikeys-enabled').checked),registerInviteRequired:!!($('invite-required')&&$('invite-required').checked),guestEnabled:!!($('guest-enabled')&&$('guest-enabled').checked),guestRounds:Math.min(1000,Math.max(1,parseInt($('guest-rounds')&&$('guest-rounds').value,10)||3)),allowRegister:!!($('register-open')&&$('register-open').checked),registerLimitPerHour:Math.min(1000,Math.max(1,parseInt($('register-limit')&&$('register-limit').value,10)||5)),allowUserProviders:!!($('user-providers-allowed')&&$('user-providers-allowed').checked),accountDeletionMode:($('account-deletion-mode')&&$('account-deletion-mode').value)||'soft',loginMaxFails:Math.min(50,Math.max(0,parseInt($('login-max-fails')&&$('login-max-fails').value,10)||0)),loginLockMs:Math.min(3600000,Math.max(0,parseInt($('login-lock-sec')&&$('login-lock-sec').value,10)||0))*1000,smtpKeyRevealable:!!($('smtp-pass-keep')&&$('smtp-pass-keep').checked),smtp:{host:$('smtp-host').value.trim(),port:parseInt($('smtp-port').value,10)||587,username:$('smtp-user').value.trim(),password:$('smtp-pass').value,encryption:$('smtp-encryption').value,fromName:$('smtp-from-name').value.trim(),fromEmail:$('smtp-from-email').value.trim()}},tplPayload); const r=await api('/api/admin/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const d=await r.json(); if(!r.ok)return toast((d.error&&d.error.message)||'保存失败',true); toast('验证设置已保存'); } catch(e) { toast('保存失败：' + ((e && e.message) || '网络错误'), true); } finally { save.disabled=false; save.textContent=old; } });
+    const tplPayload=MAIL_TPL.loaded?{mailTemplates:{tplVersion:2,verifySubject:MAIL_TPL.tpl.verify.subject,verifyHtml:MAIL_TPL.tpl.verify.html,resetSubject:MAIL_TPL.tpl.reset.subject,resetHtml:MAIL_TPL.tpl.reset.html}}:{}; const payload=Object.assign({emailVerificationEnabled:!!$('verify-email-enabled').checked,passwordResetEnabled:!!$('verify-reset-enabled').checked,freeQuotaUnlimited:!!$('verify-quota-unlimited').checked,freeQuota:parseInt($('verify-free-quota').value,10)||0,sessionDays:Math.min(30,Math.max(1,parseInt($('session-days')&&$('session-days').value,10)||7)),apiKeysEnabled:!!($('apikeys-enabled')&&$('apikeys-enabled').checked),registerInviteRequired:!!($('invite-required')&&$('invite-required').checked),guestEnabled:!!($('guest-enabled')&&$('guest-enabled').checked),guestRounds:Math.min(1000,Math.max(1,parseInt($('guest-rounds')&&$('guest-rounds').value,10)||3)),allowRegister:!!($('register-open')&&$('register-open').checked),registerLimitPerHour:Math.min(1000,Math.max(1,parseInt($('register-limit')&&$('register-limit').value,10)||5)),allowUserProviders:!!($('user-providers-allowed')&&$('user-providers-allowed').checked),accountDeletionMode:($('account-deletion-mode')&&$('account-deletion-mode').value)||'soft',memoryEnabled:!!($('memory-enabled')&&$('memory-enabled').checked),totpEnabled:!!($('totp-enabled')&&$('totp-enabled').checked),loginAlertEnabled:!!($('login-alert-enabled')&&$('login-alert-enabled').checked),quotaWarnBelow:Math.min(100000,Math.max(0,parseInt($('quota-warn-below')&&$('quota-warn-below').value,10)||0)),defaultThemePack:($('default-theme-pack')&&$('default-theme-pack').value)||'default',loginMaxFails:Math.min(50,Math.max(0,parseInt($('login-max-fails')&&$('login-max-fails').value,10)||0)),loginLockMs:Math.min(3600000,Math.max(0,parseInt($('login-lock-sec')&&$('login-lock-sec').value,10)||0))*1000,smtpKeyRevealable:!!($('smtp-pass-keep')&&$('smtp-pass-keep').checked),smtp:{host:$('smtp-host').value.trim(),port:parseInt($('smtp-port').value,10)||587,username:$('smtp-user').value.trim(),password:$('smtp-pass').value,encryption:$('smtp-encryption').value,fromName:$('smtp-from-name').value.trim(),fromEmail:$('smtp-from-email').value.trim()}},tplPayload); const r=await api('/api/admin/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const d=await r.json(); if(!r.ok)return toast((d.error&&d.error.message)||'保存失败',true); toast('验证设置已保存'); } catch(e) { toast('保存失败：' + ((e && e.message) || '网络错误'), true); } finally { save.disabled=false; save.textContent=old; } });
   const invalidate=$('session-invalidate'); if(invalidate) invalidate.addEventListener('click',async()=>{
     const ok=window.OCUI&&OCUI.confirm?await OCUI.confirm({title:'强制全站下线',message:'所有人的现有登录态会立即失效（包括你自己），需要重新登录。确认执行？',danger:true,confirmText:'执行'}):confirm('所有人的现有登录态会立即失效（包括你自己），确认执行？');
     if(!ok) return;

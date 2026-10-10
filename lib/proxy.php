@@ -2730,6 +2730,11 @@ function tc_api_proxy($format, $apiKeyOwner = null) {
             'saveApiChat' => ($apiKeyOwner !== null)
                 && !empty($db['settings']['apiSaveChats'])
                 && !empty($db['settings']['persistChats']),
+            // 跨对话记忆:在事务里拼好注入文本带出去(事务外读不到库)。
+            // 只对正式对话注入,辅助调用(标题/跟进/判定/对比等 _purpose)跳过。
+            'memoryPrompt' => (!empty($db['settings']['memoryEnabled']) && isset($b['_purpose']) && (string) $b['_purpose'] === '')
+                ? tc_memories_prompt_text(tc_memories_of($db, $user['id'])['items'])
+                : '',
         );
     });
 
@@ -2777,6 +2782,12 @@ function tc_api_proxy($format, $apiKeyOwner = null) {
     $body = $ctx['body'];
     $cost = $ctx['cost'];
     $citations = array();
+    // 跨对话记忆注入:管理端总开关 + 只对正式对话生效(生成标题/跟进建议/工具判定
+    // 这类辅助调用不注入,省 token 也避免污染小任务)。拼接进最前面的 system 消息,
+    // 之后联网检索/链接读取的上下文继续往后追加,互不覆盖。
+    if (!empty($ctx['memoryPrompt'])) {
+        tc_append_system_text($body, $format, $ctx['memoryPrompt']);
+    }
     $searchMode = isset($ctx['wantSearch']) ? (string) $ctx['wantSearch'] : '';
     if ($searchMode === '1' || $searchMode === 'true') $searchMode = 'on';
     if ($searchMode === 'on' || $searchMode === 'auto') {

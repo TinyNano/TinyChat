@@ -507,6 +507,72 @@
     });
   };
 
+  // ============ 两步验证(TOTP)验证码弹窗 ============
+  // 登录页与主站登录弹窗共用:登录响应带 {mfa:'totp', ticket} 时,拿票据换验证码输入,
+  // 成功后回调 onSuccess(data)(data 里带正式 token/user)。失败(验证码错)留在弹窗内提示。
+  UI.totpGate = function (ticket, onSuccess, opts = {}) {
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask oc-confirm-mask';
+    mask.innerHTML =
+      '<div class="modal modal-sm" role="dialog" aria-modal="true">'
+      + '<div class="modal-header"><h3>' + UI.escapeHtml(opts.title || '两步验证') + '</h3></div>'
+      + '<div class="modal-body">'
+      + '<p class="confirm-message">请输入验证器 App 上的 6 位验证码完成登录。</p>'
+      + '<input type="text" class="oc-prompt-input oc-totp-input" data-autofocus inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000000" style="width:100%;letter-spacing:0.4em;text-align:center;font-size:1.25rem">'
+      + '<div class="oc-totp-err hidden muted small" role="alert" style="color:var(--danger,#dc2626);margin-top:8px;"></div>'
+      + '</div>'
+      + '<div class="modal-footer">'
+      + '<button class="btn" data-act="cancel">' + UI.escapeHtml(opts.cancelText || '返回重新登录') + '</button>'
+      + '<button class="btn primary" data-act="ok">验证并登录</button>'
+      + '</div></div>';
+    document.body.appendChild(mask);
+    UI.openModal(mask);
+    const input = mask.querySelector('.oc-totp-input');
+    const errBox = mask.querySelector('.oc-totp-err');
+    const okBtn = mask.querySelector('[data-act="ok"]');
+    const close = () => { UI.closeModal(mask); setTimeout(() => mask.remove(), 340); };
+    const showErr = (m) => { errBox.textContent = m; errBox.classList.remove('hidden'); };
+    const submit = async () => {
+      const code = String(input.value || '').trim();
+      if (!/^\d{6}$/.test(code)) return showErr('请输入 6 位数字验证码');
+      okBtn.disabled = true;
+      try {
+        const r = await fetch((window.API_BASE || '') + '/api/auth/mfa', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket, code: code }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error((d.error && d.error.message) || '验证失败');
+        close();
+        if (typeof onSuccess === 'function') onSuccess(d);
+      } catch (ex) {
+        showErr(ex.message || '验证失败');
+        okBtn.disabled = false;
+        input.focus();
+        input.select();
+      }
+    };
+    mask.addEventListener('click', (e) => {
+      if (e.target === mask) return close();
+      const act = e.target.closest('[data-act]');
+      if (!act) return;
+      if (act.dataset.act === 'ok') submit();
+      else close();
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') { e.preventDefault(); submit(); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+    });
+    input.addEventListener('input', () => {
+      input.value = input.value.replace(/[^\d]/g, '').slice(0, 6);
+      errBox.classList.add('hidden');
+    });
+    setTimeout(() => { input.focus(); }, 60);
+    return mask;
+  };
+
   // ============ 主题 ============
   const HLJS = { light: '/vendor/highlight/github.min.css', dark: '/vendor/highlight/github-dark.min.css' };
   UI.resolveTheme = function (mode) {
