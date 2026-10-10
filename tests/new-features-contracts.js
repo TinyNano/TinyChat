@@ -90,6 +90,10 @@ check('方块主题文件存在且被主题目录引用', fs.existsSync(path.joi
 
 console.log('== 7. extras.js 接线 ==');
 check('extras.js 已挂进 index.html', indexHtml.includes('static/js/extras.min.js'));
+check('动态输入弹窗有站内材质(chrome.css 带 .oc-prompt-input 规则,不再原生裸奔)', /\.oc-prompt-input \{/.test(read('static/css/chrome.css')));
+check('方块主题覆盖 .oc-prompt-input(白卡片上不能白底白字)', /\.oc-prompt-input$|\.oc-prompt-input \{|\.oc-prompt-input:focus/m.test(read('static/css/theme-block.css')) && read('static/css/theme-block.css').includes('html[data-oc-theme="block"] .oc-prompt-input'));
+check('记忆面板输入框走 .field 体系(非裸 input)', extrasJs.includes('class="field"') && /label class="field" style="flex:1/.test(extrasJs));
+check('自定义指令 textarea 走 .field 体系', /<label class="field"[^>]*><span>指令内容（留空则不注入）<\/span><textarea id="pref-custom-instructions"/.test(indexHtml));
 check('朗读按钮与语音输入按钮已接线', messagesJs.includes('data-act="speak"') && indexHtml.includes('id="stt-btn"'));
 check('斜杠指令挂进输入事件', appJs.includes('window.OCExtras.onInputChanged()') && appJs.includes('window.OCExtras.onInputKeydown(e)'));
 check('快捷键:Ctrl+K 搜索 / Ctrl+Shift+O 新会话 / ? 速查', conversationsJs.includes("handlers.onFocusSearch") && conversationsJs.includes("e.shiftKey && k === 'o'") && conversationsJs.includes("e.key === '?'"));

@@ -3137,7 +3137,9 @@ body.share-page {
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--bg);
+  /* --bg 这个变量从未定义过,背景一直落成透明 —— 换成输入框的既有令牌 --bg-input,
+     与单行输入框同材质(方块主题下靠 .field textarea 覆盖,不受这里影响)。 */
+  background: var(--bg-input);
   color: var(--text);
   font: inherit;
   line-height: 1.5;
@@ -6026,3 +6028,19 @@ body.admin-body { overflow: visible !important; }
 }
 .usage-trend-col:hover .usage-trend-bar { opacity: 1; }
 .usage-trend-label { font-size: 9.5px; color: var(--text-tertiary, #86868b); white-space: nowrap; }
+
+/* 动态输入弹窗(UI.prompt / TOTP 验证码)的输入框:此前没有样式规则,
+   浏览器按原生外观渲染(白底、细灰边、直角),与站内表单格格不入。
+   与 .field input(style.css + redesign.css)同一材质;聚焦光环走全局
+   input:focus-visible 规则,这里不用重复。 */
+.oc-prompt-input {
+  padding: 11px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--bg-surface);
+  color: var(--text);
+  font: inherit;
+  outline: none;
+  transition: border-color 0.16s, box-shadow 0.16s, background 0.16s;
+}
+.oc-prompt-input::placeholder { color: var(--text-tertiary); }

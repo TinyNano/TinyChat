@@ -526,13 +526,16 @@ html[data-oc-theme="block"] .field select {
 /* 「透明描边」得靠底色差撑住。后台卡片是白底(--bg-surface #fff),而输入框底色
    同样是 #fff —— 又白又没描边,输入框在卡片上就**完全看不见**:设置页里那一排
    数字只剩「50」「6」几个孤零零的字浮在卡片上(实测如此,像是没渲染出来的裸文本)。
-   把输入框底改成浅灰的 --bg-surface-2,重新读得出「这里可以填」。 */
+   把输入框底改成浅灰的 --bg-surface-2,重新读得出「这里可以填」。
+   动态输入弹窗的 .oc-prompt-input(UI.prompt / TOTP 验证码)是后来加的同类,
+   不加进来就是同一个白底白字的坑(方块主题下弹窗也是白卡片)。 */
 html[data-oc-theme="block"] .admin-card input:not([type="checkbox"]):not([type="radio"]),
 html[data-oc-theme="block"] .admin-card textarea,
 html[data-oc-theme="block"] .admin-card select,
 html[data-oc-theme="block"] .field input:not([type="checkbox"]):not([type="radio"]),
 html[data-oc-theme="block"] .field textarea,
-html[data-oc-theme="block"] .field select {
+html[data-oc-theme="block"] .field select,
+html[data-oc-theme="block"] .oc-prompt-input {
   background: var(--bg-surface-2) !important;
 }
 /* 聚焦时给回一圈品牌色,否则「正在编辑哪个框」也看不出来 */
@@ -541,7 +544,8 @@ html[data-oc-theme="block"] .admin-card textarea:focus,
 html[data-oc-theme="block"] .admin-card select:focus,
 html[data-oc-theme="block"] .field input:not([type="checkbox"]):not([type="radio"]):focus,
 html[data-oc-theme="block"] .field textarea:focus,
-html[data-oc-theme="block"] .field select:focus {
+html[data-oc-theme="block"] .field select:focus,
+html[data-oc-theme="block"] .oc-prompt-input:focus {
   border-color: var(--brand) !important;
   box-shadow: 0 0 0 3px var(--ring-brand, rgba(0, 113, 227, 0.18)) !important;
 }

@@ -151,11 +151,23 @@ await sleep(400);
 const savedIns = await page.evaluate(() => { try { return (JSON.parse(localStorage.getItem('oc_prefs') || '{}').customInstructions) || ''; } catch (e) { return ''; } });
 check('自定义指令已写入 oc_prefs(云同步管道)', savedIns === '请始终用中文回答', 'got=' + savedIns);
 check('记忆管理入口存在', await page.isVisible('#pref-memory-manage'));
+check('自定义指令 textarea 有站内材质(非原生外观)', await page.evaluate(() => {
+  const t = document.getElementById('pref-custom-instructions');
+  if (!t) return false;
+  const cs = getComputedStyle(t);
+  return cs.borderStyle !== 'none' && cs.borderRadius !== '0px' && cs.backgroundColor !== 'rgba(0, 0, 0, 0)';
+}));
 await page.click('#pref-memory-manage');
 await page.waitForSelector('.modal-mask #oc-mem-list', { timeout: 8000 });
 await sleep(500);
 const memEmpty = await page.textContent('#oc-mem-list');
 check('记忆面板打开并加载(空态文案)', (memEmpty || '').length > 0);
+check('记忆新增输入框有站内材质(label.field,非原生外观)', await page.evaluate(() => {
+  const i = document.getElementById('oc-mem-new');
+  if (!i) return false;
+  const cs = getComputedStyle(i);
+  return cs.borderStyle !== 'none' && cs.borderRadius !== '0px' && cs.backgroundColor !== 'rgba(0, 0, 0, 0)';
+}));
 await page.evaluate(() => { const m = document.getElementById('settings-modal'); if (m && window.OCUI) window.OCUI.closeModal(m); });
 await page.evaluate(() => document.querySelectorAll('.modal-mask.show').forEach((m) => { if (window.OCUI) window.OCUI.closeModal(m); }));
 await sleep(400);
