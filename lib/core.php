@@ -6,7 +6,7 @@ if (!defined('TC_ROOT')) {
     define('TC_ROOT', dirname(__DIR__));
 }
 
-define('TC_VERSION', '2.2.1');
+define('TC_VERSION', '2.3.0');
 // 单篇笔记正文上限(字符)。超出时接口明确报错而不是静默截断。
 define('TC_NOTE_MAX_CHARS', 500000);
 // 敏感词库上限(去重后的条数)。达到上限后新增词条被丢弃,单个词条本身不截断。
@@ -4599,6 +4599,7 @@ function tc_quota_purpose_label($purpose, $model = '') {
         'search' => '联网检索',
         'parse' => '文档解析',
         'compare' => '多模型对比',
+        'rewrite' => '代码块改写',        // 代码块预览里的「让 AI 改」(只发一段代码,不进会话历史)
         'assistant' => '助手对话',
         'api' => 'API 调用',
         // ---- AI 笔记 ----

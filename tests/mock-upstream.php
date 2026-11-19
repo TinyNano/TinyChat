@@ -333,12 +333,42 @@ if ($toolModel === 'mock-tool-stream' || $toolModel === 'mock-tool-call') {
         return;
     }
     echo json_encode(array(
-        'id' => 'mock-tool', 'object' => 'chat.completion', 'model' => 'mock-model',
+        'id' => 'mock-tool', 'object' => 'chat.completion', 'model' => $toolModel,
         'choices' => array(array('index' => 0, 'message' => array(
             'role' => 'assistant', 'content' => null,
             'tool_calls' => array(array('id' => 'call_mock_1', 'type' => 'function', 'function' => array('name' => 'get_weather', 'arguments' => '{"city":"北京"}'))),
         ), 'finish_reason' => 'tool_calls')),
         'usage' => array('prompt_tokens' => 20, 'completion_tokens' => 8),
+    ), JSON_UNESCAPED_UNICODE);
+    return;
+}
+// 代码块改写(mock-rewrite):按提示词里出现的标记决定「怎么改」,供预览的「让 AI 改」回归。
+// 模型名本身固定,所以改写内容只能由请求里的指令驱动:
+//   [bad]  → 只回一句说明、不给代码(校验「没有新代码」不会被当成成功)
+//   [same] → 原样返回原代码(同上,宽松比较也不该通过)
+//   其它   → 返回改过的页面(带上 REWRITTEN 标记)
+if ($toolModel === 'mock-rewrite') {
+    $prompt = '';
+    if (is_array($body)) {
+        foreach ((array) (isset($body['messages']) ? $body['messages'] : array()) as $m) {
+            if (is_array($m) && isset($m['role']) && $m['role'] === 'user') $prompt .= (string) $m['content'];
+        }
+        if (isset($body['prompt'])) $prompt .= (string) $body['prompt'];
+        if (isset($body['input']) && is_string($body['input'])) $prompt .= $body['input'];
+    }
+    $cur = "";
+    if (preg_match('/Current code:\s*```[^\n]*\n([\s\S]*?)\n```/', $prompt, $mm)) $cur = $mm[1];
+    if (strpos($prompt, '[bad]') !== false) {
+        $content = '抱歉，我看不出你想改哪一部分。';
+    } elseif (strpos($prompt, '[same]') !== false) {
+        $content = "```html\n" . $cur . "\n```";
+    } else {
+        $content = "```html\n<!doctype html>\n<html><body><h1 id=\"hello\">REWRITTEN</h1></body></html>\n```";
+    }
+    echo json_encode(array(
+        'id' => 'mock-rewrite', 'object' => 'chat.completion', 'model' => 'mock-rewrite',
+        'choices' => array(array('index' => 0, 'message' => array('role' => 'assistant', 'content' => $content), 'finish_reason' => 'stop')),
+        'usage' => array('prompt_tokens' => 120, 'completion_tokens' => 60),
     ), JSON_UNESCAPED_UNICODE);
     return;
 }

@@ -16,6 +16,8 @@ import { tmpdir } from 'node:os';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PORT = Number(process.env.GUI_PORT || 8394);
+// 改写自检要一个可判定的上游:mock-upstream.php 的 mock-rewrite 按提示词返回不同结果
+const MOCK_PORT = PORT + 1;
 const BASE = `http://127.0.0.1:${PORT}`;
 const ADMIN = { name: 'admin', password: 'v220-pass' };
 
@@ -52,12 +54,17 @@ if (!pw) { console.log('(skip) 未找到 playwright,跳过 v2.2.0 GUI 自检'); 
 const TMP = join(tmpdir(), 'tc-v220-' + Date.now());
 mkdirSync(TMP, { recursive: true });
 let app = null;
+let mock = null;
 function cleanup() {
   try { if (app) app.kill(); } catch (e) { /* 忽略 */ }
+  try { if (mock) mock.kill(); } catch (e) { /* 忽略 */ }
   try { rmSync(TMP, { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
 }
 process.on('exit', cleanup);
 
+mock = spawn('php', ['-S', `127.0.0.1:${MOCK_PORT}`, 'tests/mock-upstream.php'], {
+  cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
+});
 app = spawn('php', ['-S', `127.0.0.1:${PORT}`, 'router.php'], {
   cwd: ROOT,
   env: Object.assign({}, process.env, {
@@ -84,6 +91,26 @@ const login = await (await fetch(BASE + '/api/auth/login', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ADMIN),
 })).json().catch(() => ({}));
 if (!login.token) { console.error('✗ 管理员登录失败: ' + JSON.stringify(login).slice(0, 300)); process.exit(1); }
+if (!(await waitFor(`http://127.0.0.1:${MOCK_PORT}/v1/models`))) {
+  console.error('✗ mock 上游未启动'); process.exit(1);
+}
+// 一个指向 mock 的供应商:改写请求要真的走完整条上游链路(格式组装 / 计费通路 / 计费用途)。
+// 默认只允许公网 80/443,本机 mock 落在 127.0.0.1:<端口>,需要管理员先放开内网供应商
+// (与自托管连 Ollama 的情形同一开关)。
+const AUTH = { Authorization: 'Bearer ' + login.token, 'Content-Type': 'application/json' };
+const allowLan = await fetch(BASE + '/api/admin/settings', {
+  method: 'POST', headers: AUTH, body: JSON.stringify({ allowPrivateUpstream: true }),
+});
+if (!allowLan.ok) { console.error('✗ 放开内网供应商失败: ' + (await allowLan.text()).slice(0, 300)); process.exit(1); }
+const provRes = await fetch(BASE + '/api/providers', {
+  method: 'POST', headers: AUTH,
+  body: JSON.stringify({
+    name: 'MockRewrite', baseUrl: `http://127.0.0.1:${MOCK_PORT}/v1`, apiKey: 'sk-mock-1234',
+    apiFormat: 'chat', scope: 'global', models: [{ id: 'mock-rewrite' }],
+  }),
+});
+if (!provRes.ok) { console.error('✗ 创建 mock 供应商失败: ' + (await provRes.text()).slice(0, 300)); process.exit(1); }
+const providerId = ((await provRes.json()).provider || {}).id || '';
 
 const browser = await pw.chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
@@ -93,7 +120,7 @@ page.on('pageerror', (e) => pageErrors.push(String((e && e.message) || e)));
 
 const now = Date.now();
 page.on('console', (m) => { if (m.type() === 'error') console.log('  [console] ' + m.text().slice(0, 200)); });
-await page.addInitScript(([token, uid, stamp]) => {
+await page.addInitScript(([token, uid, stamp, pid]) => {
   // 自检探针(捕获阶段):按下按键后当前会话有没有被任何处理器切走。
   // 不能只看冒泡阶段的 defaultPrevented —— 其它处理器(如输入框自身)会先接管,
   // 那时「键被接住了」并不代表「会话切了」。
@@ -152,7 +179,14 @@ await page.addInitScript(([token, uid, stamp]) => {
       ],
     },
   ]));
-}, [login.token, login.user.id, now]);
+  // 改写会从当前选择发请求:开页前就选好 mock 供应商与模型(等价于用户在前台选模型)
+  if (pid) {
+    try {
+      // 键名与 ui.js 的 setPref 一致:lastProviderId / lastModel 是「上次选择」,启动时据此恢复
+      localStorage.setItem('oc_prefs', JSON.stringify({ lastProviderId: pid, lastModel: 'mock-rewrite' }));
+    } catch (e) { /* 忽略 */ }
+  }
+}, [login.token, login.user.id, now, providerId]);
 
 // 静态资源改走源码(见上)
 await page.route('**/static/js/*.min.js*', (route) => {
@@ -465,6 +499,108 @@ await page.evaluate(() => { const a = document.getElementById('chat-area'); a.sc
 await sleep(400);
 const mid = await page.evaluate(() => { const t = document.querySelector('.chat-toc-track'); return t ? t.style.getPropertyValue('--toc-start') : ''; });
 check('滚动后轨道起点随之前移', mid !== tocInfo.start && parseFloat(mid) > 0, tocInfo.start + ' -> ' + mid);
+
+console.log('== 9. 代码块「让 AI 改」==');
+// 回到代码块那条会话,取第一块 HTML 代码
+await page.evaluate(() => {
+  window.OCApp.openChatById('pv1');
+});
+await sleep(600);
+check('对话里给了「让 AI 改」入口', await page.evaluate(() => {
+  const btn = document.querySelector('.msg.assistant .code-block [data-act="ask-ai"]');
+  return !!btn && !btn.classList.contains('hidden');
+}), await page.evaluate(() => {
+  const p = document.querySelector('.msg.assistant .code-prev-panel');
+  const btn = p && p.querySelector('[data-act="ask-ai"]');
+  return btn ? btn.className + ' | hidden=' + btn.classList.contains('hidden') + ' | title=' + btn.title : 'no btn';
+}));
+// 面板默认收起:点「预览」展开,再点「让 AI 改」浮出输入框
+await page.evaluate(() => {
+  const b = document.querySelector('.msg.assistant .code-block .code-prev-toggle');
+  if (b) b.click();
+});
+await sleep(200);
+await page.evaluate(() => {
+  const btn = document.querySelector('.msg.assistant .code-block [data-act="ask-ai"]');
+  if (btn) btn.click();
+});
+await sleep(200);
+check('点「让 AI 改」浮出输入框', await page.evaluate(() => {
+  const f = document.querySelector('.msg.assistant .code-block .cpp-ask');
+  return !!f && !f.classList.contains('hidden');
+}));
+const origCode = await page.evaluate(() => {
+  const b = document.querySelector('.msg.assistant .code-block');
+  return b ? b.querySelector('pre code').textContent : '';
+});
+
+// 1) 模型没给代码:不能当成成功
+await page.fill('.msg.assistant .code-block .cpp-ask-input', '[bad] 随便改改');
+await page.evaluate(() => {
+  const f = document.querySelector('.msg.assistant .code-block .cpp-ask');
+  f.requestSubmit();
+});
+await sleep(1500);
+const afterBad = await page.evaluate(() => ({
+  code: (document.querySelector('.msg.assistant .code-block pre code') || {}).textContent || '',
+  ver: (document.querySelector('.msg.assistant .code-block .cpp-ver') || {}).textContent || '',
+  toast: Array.from(document.querySelectorAll('.toast')).map((t) => t.textContent).join(' | '),
+}));
+check('模型没给代码时不改动内容', afterBad.code === origCode, afterBad.toast);
+check('模型没给代码时给出提示', afterBad.toast.indexOf('没有给出新的代码') >= 0, afterBad.toast);
+
+// 2) 正常改写:代码被替换、出现修订标记、自动切到预览且预览里是新版本
+await page.evaluate(() => {
+  const btn = document.querySelector('.msg.assistant .code-block [data-act="ask-ai"]');
+  if (btn && btn.classList.contains('hidden')) return;
+  const f = document.querySelector('.msg.assistant .code-block .cpp-ask');
+  if (f.classList.contains('hidden')) btn.click();
+});
+await page.fill('.msg.assistant .code-block .cpp-ask-input', '把标题改成 REWRITTEN');
+await page.evaluate(() => document.querySelector('.msg.assistant .code-block .cpp-ask').requestSubmit());
+await sleep(1800);
+const afterOk = await page.evaluate(() => {
+  const b = document.querySelector('.msg.assistant .code-block');
+  const frame = b.querySelector('.oc-prev-frame');
+  const pre = b.querySelector(':scope > pre');
+  return {
+    code: b.querySelector('pre code').textContent,
+    ver: b.querySelector('.cpp-ver').textContent,
+    verHidden: b.querySelector('.cpp-ver').classList.contains('hidden'),
+    previewTab: !!b.querySelector('.cpp-tab[data-tab="preview"].active'),
+    codeHidden: pre.classList.contains('cpp-hidden'),
+    sandbox: frame ? frame.getAttribute('sandbox') : '',
+    srcdoc: frame ? String(frame.getAttribute('srcdoc') || '') : '',
+  };
+});
+check('改写后代码块内容被替换', afterOk.code.indexOf('REWRITTEN') >= 0 && afterOk.code.indexOf('预览成功') < 0, afterOk.code.slice(0, 80));
+check('改写后出现修订标记', !afterOk.verHidden && /修订 v2/.test(afterOk.ver), afterOk.ver);
+check('改写后自动切到预览', afterOk.previewTab && afterOk.codeHidden);
+check('回填后的预览仍在不透明源沙箱里', !!afterOk.sandbox && afterOk.sandbox.indexOf('allow-same-origin') < 0, afterOk.sandbox);
+check('预览文档里是新代码', afterOk.srcdoc.indexOf('REWRITTEN') >= 0, afterOk.srcdoc.slice(0, 120));
+
+// 3) 撤销:回到模型原版,修订标记消失
+await page.evaluate(() => {
+  const b = document.querySelector('.msg.assistant .code-block [data-act="undo-ai"]');
+  if (b) b.click();
+});
+await sleep(400);
+const afterUndo = await page.evaluate(() => {
+  const b = document.querySelector('.msg.assistant .code-block');
+  return {
+    code: b.querySelector('pre code').textContent,
+    verHidden: b.querySelector('.cpp-ver').classList.contains('hidden'),
+    undoHidden: b.querySelector('[data-act="undo-ai"]').classList.contains('hidden'),
+    srcdoc: String((b.querySelector('.oc-prev-frame') || {}).srcdoc || ''),
+  };
+});
+check('撤销后代码回到原版', afterUndo.code === origCode, afterUndo.code.slice(0, 60));
+check('撤销后修订标记消失', afterUndo.verHidden && afterUndo.undoHidden);
+check('撤销后预览同步回原版', afterUndo.srcdoc.indexOf('预览成功') >= 0 && afterUndo.srcdoc.indexOf('REWRITTEN') < 0);
+// 预览页里的样例脚本会尝试读 localStorage:被沙箱挡住是预期结果(这正是隔离在起作用),
+// 浏览器把它记成 pageerror。只排除这一条,其它异常仍然算失败。
+const realErrors = pageErrors.filter((e) => e.indexOf("The document is sandboxed and lacks the 'allow-same-origin' flag") < 0);
+check('自检期间没有新增 JS 异常', realErrors.length === 0, realErrors.slice(0, 2).join(' | '));
 
 await browser.close();
 console.log('');

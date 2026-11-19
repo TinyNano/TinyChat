@@ -2130,6 +2130,52 @@ body.chat-resizing * { cursor: col-resize !important; }
 /* 「预览」标签下隐藏原代码块:同一个块里切标签,不另起一份滚动容器 */
 .code-block.preview-open > pre.cpp-hidden { display: none; }
 
+
+/* 17c-2. 预览面板里的「让 AI 改」与修订标记(preview.js) ----------
+   文字类控件沿用令牌色;错误/修正说明一律用辅助色,不抢正文。 */
+.cpp-ver {
+  font-size: 0.786rem;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  cursor: help;
+}
+.cpp-btn.hidden { display: none; }
+.cpp-btn[disabled] { opacity: 0.5; cursor: default; }
+.cpp-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--bg-surface);
+}
+.cpp-ask.hidden { display: none; }
+.cpp-ask-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 52px;
+  background: var(--bg-input, var(--bg-surface-2, var(--bg-surface)));
+  color: var(--text);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 0.893rem;
+  line-height: 1.5;
+}
+.cpp-ask-input:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 55%, var(--hairline)); }
+.cpp-ask-row { display: flex; align-items: center; gap: 8px; }
+.cpp-ask-tip { flex: 1 1 auto; font-size: 0.786rem; color: var(--text-tertiary); }
+.cpp-ask.is-busy .cpp-ask-tip::after { content: ' 正在改写…'; color: var(--accent); }
+.cpp-send {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+  white-space: nowrap;
+}
 /* ---------- 17d. 工具调用过程 chip(OCTools.renderChips) ----------
    参数与结果都是模型/工具给的不可信文本,渲染端只用 textContent 写入;这里只管样式。 */
 .tool-calls { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 2px; }

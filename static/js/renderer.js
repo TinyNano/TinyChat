@@ -963,6 +963,14 @@ R.render = function (text) {
     return R.render(text || '');
   };
 
+  // 单段代码(不带围栏)交给同一个高亮函数渲染,返回完整的 .code-block。
+  // 预览的「让 AI 改」回填时用它:换掉旧块后仍然是有高亮、能复制、能再预览的代码块,
+  // 而不是一坨转义文本。调用方传的是已经取好的纯代码,这里不解析 Markdown。
+  R.highlight = function (code, lang) {
+    const info = String(lang || '').trim();
+    return highlight(String(code == null ? '' : code), info, '');
+  };
+
   /**
    * 渲染并挂载到容器（render + enhance 一步完成）
    * @param {HTMLElement} container

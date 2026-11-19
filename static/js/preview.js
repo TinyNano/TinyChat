@@ -1,6 +1,7 @@
 'use strict';
 /**
- * preview.js — HTML / SVG 代码块的「预览」标签页(对话、笔记预览、分享页共用)。
+ * preview.js — HTML / SVG 代码块的「预览」标签页(对话、笔记预览、分享页共用),
+ * 以及对话里的「让 AI 改」闭环(改完就地把新代码写回这个代码块)。
  *
  * 为什么必须放在不透明源沙箱里:
  *   模型输出的 HTML/SVG 是不可信内容,而本页面的 localStorage 里放着登录令牌(oc_token)。
@@ -13,10 +14,16 @@
  *   代码里的动画/交互脚本会按需在沙箱内打开 —— 打开预览不会自己弹窗、跳转或死循环。
  *
  * 接入:R.enhance() 里调用 OCPreview.enhance(container)。面板状态(标签/展开/是否允许
- * 脚本)只存在 DOM 上,不进会话数据,不参与云同步。
+ * 脚本)只存在 DOM 上,不进会话数据,不参与云同步。修订版本(v1/v2/…)存在代码块上,
+ * 跟着会话一起保存 —— 回退一版不该因为刷新页面而丢失。
  */
 (function () {
   const P = {};
+
+  // 「让 AI 改」的入口由 app.js 注册(它知道模型与请求格式;这个文件只出现在分享页时也
+  // 能正常加载,所以不能在这里直接依赖 OCApp)
+  let rewriteHandler = null;
+  P.setRewriteHandler = function (fn) { rewriteHandler = typeof fn === 'function' ? fn : null; };
 
   // 走预览的语言集合(小写)。xml 不进来:它通常是配置文件而不是页面。
   const HTML_LANGS = { html: 1, htm: 1, xhtml: 1, vue: 1, svelte: 1 };
@@ -83,11 +90,174 @@
     return document.documentElement.getAttribute('data-theme') === 'dark';
   }
 
+  // ---------- 代码块的文本读写(改写回填与「撤销 AI 修改」共用) ----------
+  // 高亮后的 <code> 里是一堆 <span>,直接改 textContent 就丢高亮。这里按「改完的正文是
+  // 怎样的一块代码」问一次渲染器要完整 HTML,再整块替换,后续的复制/预览/折叠都重新挂。
+  function replaceCode(block, text) {
+    const codeEl = block.querySelector('pre > code');
+    if (!codeEl) return false;
+    const lang = String(block.getAttribute('data-lang') || '');
+    const R = window.OCRenderer;
+    if (R && typeof R.highlight === 'function' && lang && lang !== 'text') {
+      try {
+        const html = R.highlight(String(text), lang);
+        if (html) {
+          const tmp = document.createElement('div');
+          tmp.innerHTML = html;
+          const fresh = tmp.querySelector('.code-block');
+          if (fresh) {
+            // 保留预览挂载状态:面板是代码块的兄弟节点,分叉时外壳整个换掉
+            const header = block.querySelector(':scope > .code-header');
+            const panel = block.querySelector(':scope > .code-prev-panel');
+            const freshHeader = fresh.querySelector('.code-header');
+            if (header && freshHeader) {
+              // 表头里的预览/Artifact 按钮属于「这个块」,不是代码的一部分 —— 把旧表头换回去
+              fresh.replaceChild(header, freshHeader);
+            }
+            if (panel) fresh.appendChild(panel);
+            fresh.dataset.prevMounted = block.dataset.prevMounted || '';
+            fresh.className = block.className.replace(/\s*(preview-open|cpp-hidden)\b/g, '').trim();
+            block.replaceWith(fresh);
+            if (R.enhance) R.enhance(fresh);
+            return true;
+          }
+        }
+      } catch (e) { /* 高亮失败就走下面的纯文本路径 */ }
+    }
+    codeEl.textContent = String(text);
+    return true;
+  }
+  P.replaceCode = replaceCode;
+
+  // 未完结的代码围栏:模型偶尔会忘了收尾,原样留着会把后面整段回答吞进代码块里
+  P.closeFences = function (text) {
+    let src = String(text || '').replace(/\r\n/g, '\n').trim();
+    const fence = /^(`{3,}|~{3,})/;
+    const lines = src.split('\n');
+    let open = '';
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(fence);
+      if (!m) continue;
+      const mark = m[1];
+      if (!open) open = mark;
+      else if (mark[0] === open[0] && mark.length >= open.length) open = '';
+    }
+    if (open) src += '\n' + open;
+    return src;
+  };
+
+  // 从模型回答里取出完整代码:优先取与原来同语言的围栏块,其次干净的全文。
+  // 「只回代码」是提示词的要求,但模型经常裹一层 ```html 或加一句说明 —— 两处都得兜住。
+  P.extractCode = function (reply, lang) {
+    const raw = String(reply || '').replace(/\r\n/g, '\n');
+    const want = String(lang || '').toLowerCase();
+    const re = /(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)\n?\1/g;
+    let m;
+    let fallback = '';
+    while ((m = re.exec(raw))) {
+      const tag = String(m[2] || '').trim().toLowerCase().split(/\s+/)[0];
+      const body = m[3];
+      if (tag === want && want) return body;
+      if (!fallback) fallback = body;
+    }
+    if (fallback) return fallback;
+    // 没有围栏:只有当回答里确实有完整文档片段时才算「给了代码」。
+    // 只允许剥掉前面的英文说明(「Here is the updated file:」);中文说明不剥 ——
+    // 说明里常带语法片段(如「把 <h1> 改成 …」),拿它回填会把一句话变成整段代码。
+    let src = raw.trim();
+    const head = src.search(/<!doctype|<html[\s>]|<svg[\s>]/i);
+    if (head < 0) return '';
+    if (head > 0 && (head > 400 || /[一-鿿]/.test(src.slice(0, head)))) return '';
+    src = src.slice(head);
+    // 带结束标签的整段标记才算完整页面/图形(单个自闭合 <svg/> 也认)
+    if (!/<\/[a-z][\w:-]*>/i.test(src) && !/<svg[\s>][\s\S]*\/>/i.test(src)) return '';
+    return src;
+  };
+
+  // ---------- 修订版本(存在代码块上,随会话保存) ----------
+  // { orig: 原始代码, stack: [{code, prompt}], out: 当前代码 }
+  // 「撤销 AI 修改」= 弹出一层回到上一版;全部弹出后 out 回到 orig。
+  function historyOf(block) {
+    let h = block._ocPrevHistory;
+    if (!h || typeof h !== 'object') {
+      h = { orig: codeOf(block), stack: [], out: '' };
+      block._ocPrevHistory = h;
+    }
+    return h;
+  }
+  P.historyOf = historyOf;
+  P.applyRevision = function (block, code) {
+    if (!replaceCode(block, code)) return false;
+    block._ocPrevHistory = Object.assign(historyOf(block), { out: String(code) });
+    return true;
+  };
+
+  function refreshToolbar(block, panel, lang) {
+    const h = block._ocPrevHistory || { stack: [] };
+    const depth = (h.stack || []).length;
+    const badge = panel.querySelector('.cpp-ver');
+    if (badge) {
+      badge.classList.toggle('hidden', !depth);
+      badge.textContent = depth ? '修订 v' + (depth + 1) : '';
+      badge.title = depth ? (h.stack[depth - 1].prompt || '按你的要求修改') : '';
+    }
+    const undo = panel.querySelector('[data-act="undo-ai"]');
+    if (undo) {
+      undo.classList.toggle('hidden', !depth && !(h.out && h.out !== h.orig));
+      undo.textContent = depth > 1 ? '回退 (v' + depth + ')' : '撤销 AI 修改';
+    }
+    // 「让 AI 改」只对能预览的块给(改写本来就是围绕页面/图形这两个场景设计的)
+    const aiBtn = panel.querySelector('[data-act="ask-ai"]');
+    if (aiBtn) {
+      aiBtn.classList.toggle('hidden', !rewriteHandler || !kindOk(lang));
+      aiBtn.title = rewritableHint(lang);
+    }
+  }
+  function kindOk(lang) {
+    const l = String(lang || '').toLowerCase();
+    return !!(HTML_LANGS[l] || SVG_LANGS[l]);
+  }
+  function rewritableHint(lang) {
+    if (!kindOk(lang)) return '只能对 HTML / SVG 代码块使用';
+    if (!rewriteHandler) return '在对话里打开才能让 AI 修改';
+    return '描述想要的改动，AI 会直接改这段代码';
+  }
+
+  // 修订栈跨重绘交接:重绘会把代码块整个换掉,streamAnswer 等路径会在旧节点被丢弃前
+  // 调用 P.carryHistory(container),把旧节点上的修订挪到新节点上(按下标对齐 —— 同一条
+  // 消息的渲染结果里代码块顺序是稳定的)。
+  P.carryHistory = function (container) {
+    if (!container || !container.querySelectorAll) return;
+    container.querySelectorAll('.code-block.has-preview').forEach((b) => {
+      if (b._ocPrevHistory && b._ocPrevHistory.stack && b._ocPrevHistory.stack.length) {
+        PREV = PREV.filter((x) => x.block !== b);
+        PREV.push({ block: b, hist: b._ocPrevHistory });
+      }
+    });
+  };
+  let PREV = [];
+  function takeCarried(block) {
+    const i = PREV.findIndex((x) => x && x.block && !x.block.isConnected);
+    if (i < 0) return null;
+    const hist = PREV.splice(i, 1)[0].hist;
+    return hist;
+  }
+
+  function historyOf(block) {
+    let h = block._ocPrevHistory;
+    if (!h || typeof h !== 'object') {
+      h = { orig: codeOf(block), stack: [], out: '' };
+      block._ocPrevHistory = h;
+    }
+    return h;
+  }
+
   function mount(block, kind) {
     block.dataset.prevMounted = '1';
     block.classList.add('has-preview');
     const header = block.querySelector(':scope > .code-header');
     if (!header) return;
+    block._ocPrevHistory = takeCarried(block) || { orig: codeOf(block), stack: [], out: '' };
 
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -103,6 +273,7 @@
       header.appendChild(box);
     }
 
+    // 树内的 <button> 都显式写 type:分享页/笔记页的代码块不一定在表单外
     const panel = document.createElement('div');
     panel.className = 'code-prev-panel hidden';
     panel.innerHTML = '<div class="cpp-toolbar">'
@@ -110,18 +281,29 @@
       + '<button type="button" class="cpp-tab active" data-tab="code" role="tab">代码</button>'
       + '<button type="button" class="cpp-tab" data-tab="preview" role="tab">预览</button>'
       + '</div>'
+      + '<span class="cpp-ver hidden"></span>'
       + '<span class="cpp-spacer"></span>'
       + '<label class="cpp-scripts" title="在沙箱内运行代码里的脚本（仍然读不到本站任何数据）"><input type="checkbox"> 运行脚本</label>'
+      + '<button type="button" class="cpp-btn hidden" data-act="undo-ai">撤销 AI 修改</button>'
+      + '<button type="button" class="cpp-btn hidden" data-act="ask-ai">让 AI 改</button>'
       + '<button type="button" class="cpp-btn" data-act="refresh" title="用当前代码重新加载预览">刷新</button>'
       + '</div>'
+      + '<form class="cpp-ask hidden">'
+      + '<textarea class="cpp-ask-input" rows="2" placeholder="说说想怎么改，例如：把背景换成深色、按钮改成圆角"></textarea>'
+      + '<div class="cpp-ask-row"><span class="cpp-ask-tip">AI 改写的代码会直接替换本块，可随时撤销</span>'
+      + '<button type="button" class="cpp-btn cpp-send" data-act="send-ai">发送</button></div>'
+      + '</form>'
       + '<div class="cpp-body"><div class="cpp-frame-wrap hidden"></div></div>';
     block.appendChild(panel);
 
     const wrap = panel.querySelector('.cpp-frame-wrap');
     const codePre = block.querySelector(':scope > pre');
+    const askForm = panel.querySelector('.cpp-ask');
+    const askInput = panel.querySelector('.cpp-ask-input');
     let frame = null;
     let allowScripts = false;
     let tab = 'code';
+    let busy = false;
 
     const renderFrame = () => {
       if (!frame) {
@@ -152,12 +334,49 @@
       btn.classList.toggle('active', open);
       if (open) {
         showTab(tab);
+        refreshToolbar(block, panel, block.getAttribute('data-lang'));
         // 展开的预览会把下方内容推低,用户刚才点的按钮可能已在可视区外;滚回表头,
         // 让「再点一次收起」始终够得着
         if (typeof btn.scrollIntoView === 'function') btn.scrollIntoView({ block: 'nearest' });
       } else {
         reset();
+        askForm.classList.add('hidden');
         if (codePre) codePre.classList.remove('cpp-hidden');
+      }
+    };
+
+    const setBusy = (on) => {
+      busy = on;
+      const send = panel.querySelector('[data-act="send-ai"]');
+      if (send) send.disabled = on;
+      askForm.classList.toggle('is-busy', on);
+    };
+
+    // 回填:改写结果既替换代码,也记进修订栈(撤销/回退用)。
+    // replaceCode 会把代码块整块换掉并把面板搬过去,所以之后所有 DOM 查找都要重新来
+    // (闭包里缓存的 wrap / codePre / askForm 都指向被丢掉的外壳)。
+    const applyRewrite = (code, prompt) => {
+      const h = historyOf(block);
+      h.stack.push({ code: String(code), prompt: String(prompt || '') });
+      if (!replaceCode(block, code)) return false;
+      h.out = String(code);
+      block._ocPrevHistory = h;
+      if (typeof block._ocPrevRefresh === 'function') block._ocPrevRefresh();
+      return true;
+    };
+
+    const undoRewrite = () => {
+      const h = historyOf(block);
+      if (h.stack && h.stack.length) h.stack.pop();
+      const back = h.stack && h.stack.length ? h.stack[h.stack.length - 1].code : h.orig;
+      if (!replaceCode(block, back)) return;
+      h.out = back;
+      if (typeof block._ocPrevRefresh === 'function') block._ocPrevRefresh();
+      // 代码已换,哪怕这次不是重绘触发的也要把预览刷新(否则显示的还是旧版本)
+      const wrapNow = block.querySelector('.cpp-frame-wrap');
+      if (wrapNow && !wrapNow.classList.contains('hidden')) {
+        const iframe = wrapNow.querySelector('iframe');
+        if (iframe) iframe.srcdoc = buildDoc(kind, codeOf(block), themeDark());
       }
     };
 
@@ -165,13 +384,82 @@
     panel.addEventListener('click', (e) => {
       const t = e.target.closest('.cpp-tab');
       if (t) { showTab(t.dataset.tab); return; }
-      const act = e.target.closest('[data-act="refresh"]');
-      if (act) { reset(); renderFrame(); }
+      if (e.target.closest('[data-act="refresh"]')) { reset(); renderFrame(); return; }
+      if (e.target.closest('[data-act="undo-ai"]')) { undoRewrite(); return; }
+      if (e.target.closest('[data-act="ask-ai"]')) {
+        if (busy) return;
+        const opening = askForm.classList.contains('hidden');
+        askForm.classList.toggle('hidden', !opening);
+        if (opening && askInput) askInput.focus();
+        return;
+      }
+      if (e.target.closest('[data-act="send-ai"]')) askForm.requestSubmit ? askForm.requestSubmit() : sendAsk();
     });
     panel.querySelector('.cpp-scripts input').addEventListener('change', (e) => {
       allowScripts = !!e.target.checked;
       if (tab === 'preview') { reset(); renderFrame(); }
     });
+    askForm.addEventListener('keydown', (e) => {
+      // Ctrl/⌘+Enter 发送;单独回车留给换行(改动描述常常要分几条写)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); askForm.requestSubmit(); }
+    });
+
+    function sendAsk() {
+      if (busy || !rewriteHandler) return;
+      const prompt = String(askInput.value || '').trim();
+      if (!prompt) { if (askInput) askInput.focus(); return; }
+      setBusy(true);
+      const lang = String(block.getAttribute('data-lang') || '');
+      Promise.resolve(rewriteHandler({ code: codeOf(block), prompt, lang, kind }))
+        .then((reply) => {
+          const code = P.extractCode(reply, lang);
+          if (!coarseChanged(codeOf(block), code)) {
+            // 模型原样返回 = 没改成。不要静默把「没变化」当成成功,否则用户以为改了
+            if (window.OCApp && window.OCApp.toast) window.OCApp.toast('AI 没有给出新的代码，换个说法再试试', true);
+            return;
+          }
+          applyRewrite(code, prompt);
+          askInput.value = '';
+          askForm.classList.add('hidden');
+          // 直接切到预览看结果(改写的目的就是看新样子);面板已被搬到新外壳里,
+          // 这里只动 DOM,不依赖闭包里的旧引用
+          const fresh = block.querySelector('.code-prev-panel');
+          if (fresh) {
+            fresh.querySelectorAll('.cpp-tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === 'preview'));
+            const preNow = block.querySelector(':scope > pre');
+            if (preNow) preNow.classList.add('cpp-hidden');
+            const wrapNow = fresh.querySelector('.cpp-frame-wrap');
+            if (wrapNow) {
+              wrapNow.classList.remove('hidden');
+              wrapNow.innerHTML = '';
+              const iframe = document.createElement('iframe');
+              iframe.className = 'oc-prev-frame';
+              iframe.setAttribute('title', '代码预览');
+              iframe.setAttribute('referrerpolicy', 'no-referrer');
+              iframe.setAttribute('sandbox', P.sandboxFor(allowScripts));
+              iframe.srcdoc = buildDoc(kind, codeOf(block), themeDark());
+              wrapNow.appendChild(iframe);
+            }
+          }
+          if (window.OCApp && window.OCApp.toast) window.OCApp.toast('已按你的要求改写，可随时撤销');
+        })
+        .catch((err) => {
+          const msg = (err && err.message) ? String(err.message) : '改写失败';
+          if (window.OCApp && window.OCApp.toast) window.OCApp.toast(msg, true);
+        })
+        .then(() => setBusy(false));
+    }
+    askForm.addEventListener('submit', (e) => { e.preventDefault(); sendAsk(); });
+
+    // 回填/撤销都可能整块替换 DOM,面板里的按钮仍指向本闭包,状态从块上重新读
+    block._ocPrevRefresh = () => refreshToolbar(block, panel, block.getAttribute('data-lang'));
+    refreshToolbar(block, panel, block.getAttribute('data-lang'));
+  }
+
+  // 「有没有改动」用宽松口径:只差空白与行尾时也算没改(模型常把整段重新缩进一遍)
+  function coarseChanged(a, b) {
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+    return !!norm(b) && norm(a) !== norm(b);
   }
 
   // 给容器里所有可预览的代码块挂面板。R.enhance 每次重绘都会调用,已挂过的跳过

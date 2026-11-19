@@ -122,6 +122,22 @@ check('新增快捷键已接线', /onPrevChat/.test(app) && /onToggleApiChats/.t
 check('分享页可导入到我的对话', /复制到我的对话/.test(read('share.html')) && /openImportedChatIfAny/.test(app));
 check('分享导入合并而非覆盖云端列表', /baseRevision: Number\(cur\.revision\)/.test(read('share.html')));
 
+// ---------- 8) v2.3.0:代码块「让 AI 改」 ----------
+const pv = read('static/js/preview.js');
+check('改写入口由 app.js 注册(分享页无 OCApp 时按钮自动隐藏)', /P\.setRewriteHandler\s*=/.test(pv) && /setRewriteHandler\(rewriteCodeBlock\)/.test(app));
+check('改写请求不写进会话历史', /async function rewriteCodeBlock/.test(app) && !/rewriteCodeBlock[\s\S]{0,2000}chat\.messages\.push/.test(app));
+check('改写单独计费用途', /_purpose: 'rewrite'/.test(app) && /'rewrite' => '代码块改写'/.test(read('lib/core.php')));
+check('四种上游格式都覆盖', ['body.system = system', 'body.instructions = system', "body.prompt = system", "{ role: 'system', content: system }"].every((k) => app.indexOf(k) >= 0));
+check('改写提示要求只回代码', /COMPLETE updated code/.test(app) && /no explanations/.test(app));
+check('回填复用渲染器的高亮(不是纯文本替换)', /R\.highlight = function/.test(read('static/js/renderer.js')) && /R\.highlight\(String\(text\), lang\)/.test(pv));
+check('回填后重新挂增强(复制/预览都还在)', /if \(R\.enhance\) R\.enhance\(fresh\)/.test(pv));
+check('没有新代码时不静默成功', /coarseChanged\(codeOf\(block\), code\)/.test(pv) && /没有给出新的代码/.test(pv));
+check('无围栏回答里只有中文说明时不当代码', /\(\?!\[\^\u4e00-\u9fff\]\)/.test(pv) === false && /\[\u4e00-\u9fff\]/.test(pv) && /if \(head < 0\) return '';/.test(pv));
+check('修订可在原地撤销/回退', /const undoRewrite = /.test(pv) && /撤销 AI 修改/.test(pv) && /回退 \(v/.test(pv));
+check('修订跨重绘交接(流式渲染不丢)', /P\.carryHistory = function/.test(pv) && (app.match(/carryHistory\(/g) || []).length >= 2);
+check('改写后的预览仍走同一沙箱规则', /P\.sandboxFor\(allowScripts\)/.test(pv));
+check('面板树内按钮都带 type', !/<button class="/.test(pv));
+
 console.log('');
 console.log(fail ? '结果: ' + fail + ' 条不通过' : '结果: 全部通过');
 process.exit(fail ? 1 : 0);

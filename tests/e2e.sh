@@ -2448,6 +2448,38 @@ assert_contains "会话索引可建(chats)" "$(curl -s -X POST "$BASE/api/me/sem
 assert_eq "未登录语义检索 401" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/me/semantic?q=x")" "401"
 curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"semanticEnabled":false,"semanticProviderId":"","semanticModel":""}' > /dev/null
 
+# ---------- 代码块「让 AI 改」 ----------
+say "== 代码块改写 =="
+# 前面的设备段落踢过所有旧令牌,这里重新登录拿一枚可用的(与语义段同样的理由)
+RWTOKEN=$(curl -s "$BASE/api/auth/login" -H "Content-Type: application/json" -H "User-Agent: E2ERewrite/1.0" -d '{"name":"tester1","password":"pass1234"}' | jget token)
+RWAUTH="Authorization: Bearer $RWTOKEN"
+assert_eq "改写段令牌可用" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/me" -H "$RWAUTH")" "200"
+# 专用供应商:mock-rewrite 按提示词决定返回什么(见 tests/mock-upstream.php)
+curl -s -X POST "$BASE/api/providers" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"name":"MockRewrite","baseUrl":"http://127.0.0.1:'"$MOCK_PORT"'/v1","apiKey":"sk-mock-1234","apiFormat":"chat","scope":"global","models":[{"id":"mock-rewrite"}]}' > /dev/null
+RWPROV=$(curl -s "$BASE/api/providers" -H "$AUTH" | grep -o '"id":"[a-f0-9]*","name":"MockRewrite"' | cut -d'"' -f4)
+[ -n "$RWPROV" ] && ok "创建改写用供应商" || bad "创建改写用供应商"
+rw() {
+  local prompt="$1"
+  local payload
+  payload=$(RWPROMPT="$prompt" python -c 'import json,os
+code = "<!doctype html>\n<html><body><h1>old</h1></body></html>"
+print(json.dumps({"providerId": os.environ["RWPROV"], "model": "mock-rewrite", "stream": False, "_purpose": "rewrite",
+  "messages": [{"role": "system", "content": "rewrite only"},
+               {"role": "user", "content": "Instruction:\n" + os.environ["RWPROMPT"] + "\n\nCurrent code:\n```html\n" + code + "\n```"}]}))')
+  curl -s -X POST "$BASE/api/proxy/chat" -H "$RWAUTH" -H "Content-Type: application/json" -d "$payload"
+}
+export RWPROV
+out=$(rw "把标题改成 REWRITTEN")
+assert_contains "改写请求走通上游" "$out" 'REWRITTEN'
+if printf '%s' "$out" | grep -q 'html'; then ok "改写结果包在代码围栏里"; else bad "改写结果包在代码围栏里"; fi
+out_bad=$(rw "[bad] 随便改")
+if printf '%s' "$out_bad" | grep -q 'REWRITTEN'; then bad "没有新代码时不返回代码"; else ok "没有新代码时不返回代码"; fi
+# 改写不落成会话:开放 API 的会话列表里不应出现改写请求的痕迹
+rwchats=$(curl -s "$BASE/api/sync/chats" -H "$RWAUTH" | grep -c 'Current code' || true)
+if [ "${rwchats:-0}" -eq 0 ]; then ok "改写请求不写进会话历史"; else bad "改写请求写进了会话历史"; fi
+if [ -n "$RWPROV" ]; then curl -s -X DELETE "$BASE/api/providers/$RWPROV" -H "$AUTH" > /dev/null; fi
+
 say ""
 say "结果: $PASS 通过, $FAIL 失败"
 [ "$FAIL" -eq 0 ]

@@ -1629,6 +1629,56 @@ function appendRounds(chatId, n) {
   return true;
 }
 
+// 代码块「让 AI 改」留下的修订只存在代码块 DOM 上(preview.js 的 _ocPrevHistory)。
+// 不跟进会话数据是有意的:回填后的代码与模型原始输出不再一致,重建这条消息时正文里
+// 仍是原版,修订会变成「幽灵」。所以刷新 / 换设备后回到原版,而不是悄悄丢掉用户的修改
+// 又声称还在。同一页面内重绘时由 preview.js 把修订带回新 DOM(见 P.enhance 的 carry)。
+
+// 给预览面板接上「按这条消息的模型发一次改写请求」。没有可用的模型/额度时返回 false,
+// 面板会隐藏该按钮(分享页根本没有 OCApp,自然不出现)。
+function canRewriteCode() {
+  return !!(state.currentProviderId && state.currentModel && state.user
+    && (quotaIsUnlimited(state.user.quota) || state.user.quota > 0));
+}
+async function rewriteCodeBlock(req) {
+  if (!canRewriteCode()) throw new Error('请先选择模型，并确认剩余次数足够');
+  const lang = String(req.lang || 'html').toLowerCase() || 'html';
+  // 代码只进这一次请求,不塞进会话历史:改写是一段「局部重写」,不需要也不应该
+  // 让整条对话变成代码评审现场(否则下一轮对话的上下文里全是 HTML 原文)。
+  const system = 'You are a precise front-end code editor. Rewrite the given ' + lang
+    + ' code exactly as the user asks. Reply with the COMPLETE updated code in one ```' + lang
+    + ' block and nothing else: no explanations, no diffs, no notes about what changed.';
+  const user = 'Instruction:\n' + String(req.prompt || '') + '\n\nCurrent code:\n```' + lang + '\n'
+    + window.OCPreview.closeFences(req.code) + '\n```';
+  const format = providerFormat();
+  const body = { model: state.currentModel, stream: false, _purpose: 'rewrite' };
+  if (state.currentProviderId) body.providerId = state.currentProviderId;
+  if (format === 'anthropic') {
+    body.max_tokens = Math.min(modelCapsNow().out, 8192);
+    body.system = system;
+    body.messages = [{ role: 'user', content: user }];
+  } else if (format === 'responses') {
+    body.instructions = system;
+    body.max_output_tokens = Math.min(modelCapsNow().out, 8192);
+    body.input = [{ role: 'user', content: user }];
+  } else if (format === 'completions') {
+    body.max_tokens = Math.min(modelCapsNow().out, 8192);
+    body.prompt = system + '\n\n' + user;
+  } else {
+    body.max_tokens = Math.min(modelCapsNow().out, 8192);
+    body.messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
+  }
+  const r = await api(ENDPOINT_BY_FORMAT[format] || ENDPOINT_BY_FORMAT.chat, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const data = await readJsonSafe(r);
+  if (!r.ok) throw new Error((data.error && data.error.message) || ('改写失败（HTTP ' + r.status + '）'));
+  const text = extractText(data, format) || '';
+  if (!text.trim()) throw new Error('模型返回了空内容');
+  refreshMe();
+  return text;
+}
+
 function renderMessages() {
   const chat = currentChat();
   const box = $('messages');
@@ -2279,6 +2329,7 @@ function buildMsgNode(m, chat, idx) {
         const root = document.createElement('div');
         root.className = 'stream-answer';
         contentDiv.appendChild(root);
+        if (window.OCPreview) window.OCPreview.carryHistory(root);
         if (window.OCRenderer && window.OCRenderer.renderStreamingInto) {
           window.OCRenderer.renderStreamingInto(root, m.content);
         } else {
@@ -3808,6 +3859,7 @@ function paintStreamingText(assistantMsg) {
     contentEl.appendChild(root);
   }
   if (window.OCRenderer && window.OCRenderer.renderStreamingInto) {
+    if (window.OCPreview) window.OCPreview.carryHistory(root);
     window.OCRenderer.renderStreamingInto(root, assistantMsg.content || '');
     highlightGroupMentions(root, currentChat());
   } else {
@@ -10665,8 +10717,11 @@ async function aiComplete(messages, opts = {}) {
   return text;
 }
 
+// 改写入口交给预览面板(体检点:preview.js 在笔记预览 / 分享页也会加载,那里没有 OCApp)
+if (window.OCPreview) window.OCPreview.setRewriteHandler(rewriteCodeBlock);
 window.OCApp = {
   state,
+
   // 自检入口:把内部动作暴露出来(tests/v220-gui.mjs 用来验证切换/长会话语义;
   // 无头浏览器里修饰键事件与首屏高度都不稳定,只按界面结果断言会得到假阴性)
   _debug: { stepChat, appendRounds },
