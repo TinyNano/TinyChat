@@ -155,6 +155,16 @@ jobs:
         run: php tests/new-features.php
       - name: 新功能源码契约自检(mfa 票据两端消费 / 记忆注入 / 收藏接线 / 截断续写 / 默认主题 / extras 挂载)
         run: node tests/new-features-contracts.js
+      - name: v2.2.0 功能 GUI 自检(预览沙箱与脚本开关 / 工具调用 chip / 登录设备 / 双链与反向链接)
+        # 预览 iframe 的隔离只有真浏览器量得出来(sandbox 属性与实际能否读到父页面是两回事);
+        # 工具 chip、设备列表、双链跳转都是 DOM 接线。「点了没反应 / 面板被盖住」这类问题,
+        # 静态检查全拦不住(本批就出过:预览面板被代码块表头压住,勾选框点不到)。
+        run: node tests/v220-gui.mjs
+      - name: v2.2.0 功能源码契约自检(预览沙箱 / 工具调用透传与回放 / 搜索索引刷新 / 设备 sid / 语义索引 / 双链)
+        # 这一批多是「少接一根线、功能照常、只是不再成立」的地方:预览 iframe 多一个
+        # allow-same-origin 就不再隔离;同步白名单漏放行 tool 消息,保存一次就把会话变坏;
+        # 设备令牌没校验 sid,「退出该设备」等于没做。读 diff 看不出来,钉成契约挡回归。
+        run: node tests/v220-contracts.js
 
   e2e:
     name: E2E(PHP ${{ matrix.php }})

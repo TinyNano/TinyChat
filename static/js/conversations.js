@@ -26,6 +26,26 @@
       '更早': ic('refresh', 14),
     },
   };
+  // 服务端搜索结果(见 C.searchList):本地过滤只看得到「这台浏览器上有的」会话,
+  // 隐私模式下没同步的、别的设备上聊的、量大后被本地裁剪掉的都搜不到。
+  // 服务端片段里命中处用 <mark></mark> 包住(FTS5 snippet 的标记),这里只认这一对标签,
+  // 其余内容一律按纯文本转义 —— 会话正文是模型输出,不能直接拼进 innerHTML。
+  function renderSnippet(snip) {
+    if (!snip) return '';
+    const marked = String(snip).split(/(<mark>|<\/mark>)/i);
+    let out = '';
+    let inB = false;
+    marked.forEach((part) => {
+      const low = part.toLowerCase();
+      if (low === '<mark>') { inB = true; return; }
+      if (low === '</mark>') { inB = false; return; }
+      const text = escapeHtml(part);
+      out += inB ? '<mark>' + text + '</mark>' : text;
+    });
+    return out;
+  }
+  C.renderSnippet = renderSnippet;
+
   const ITEM_HTML = (c, activeCls) => {
     // 群聊会话用群聊图标标识;普通对话优先显示所用模型的 logo
     const logo = c.groupId
@@ -81,6 +101,71 @@
    * @param {Array} chats
    * @param {object} opts {currentId, onSelect, onDelete, onRename, onTogglePin, onShare, onBranch}
    */
+  // ============ 服务端搜索结果列表(GET /api/chats/search) ============
+  // hits: [{id, title, snippet}]。点一条直接打开该会话(必须来自本地列表,否则先拉取);
+  // 本地没有的会话用 chat:null 标记,由调用方按 id 去云端取。
+  C.searchList = function (listEl, kw, hits, opts = {}) {
+    listEl.innerHTML = '';
+    const searchBox = document.createElement('div');
+    searchBox.className = 'chat-search';
+    searchBox.innerHTML = (window.OC ? window.OC.icon('search', 13) : '')
+      + '<input type="search" id="chat-search-input" placeholder="搜索对话…" value="" autocomplete="off" spellcheck="false">';
+    listEl.appendChild(searchBox);
+    const input = searchBox.querySelector('input');
+    input.value = kw || '';
+    C._searchKeyword = input.value;
+    input.addEventListener('input', () => {
+      C._searchKeyword = input.value;
+      if (typeof opts.onKeyword === 'function') opts.onKeyword(input.value);
+    });
+    const head = document.createElement('div');
+    head.className = 'chat-search-scope';
+    head.innerHTML = '<span>全文搜索</span><span class="chat-search-scope-note">含未在本机打开的会话</span>';
+    listEl.appendChild(head);
+    if (!hits.length) {
+      const empty = document.createElement('div');
+      empty.className = 'chat-list-empty';
+      empty.textContent = '无匹配对话';
+      listEl.appendChild(empty);
+      return;
+    }
+    hits.forEach((h) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'chat-item-wrap';
+      const item = document.createElement('div');
+      item.className = 'chat-item chat-search-hit' + (h.id === opts.currentId ? ' active' : '');
+      item.setAttribute('role', 'button');
+      item.setAttribute('tabindex', '0');
+      const title = document.createElement('span');
+      title.className = 'chat-title';
+      title.textContent = h.title || '新对话';
+      const row = document.createElement('div');
+      row.className = 'chat-hit-main';
+      row.appendChild(title);
+      if (h.snippet) {
+        const sn = document.createElement('span');
+        sn.className = 'chat-hit-snippet';
+        sn.innerHTML = renderSnippet(h.snippet);
+        row.appendChild(sn);
+      }
+      // 语义命中单独标一下:用户要知道这条是「意思相近」而不是字面匹配
+      if (h.semantic) {
+        const tag = document.createElement('span');
+        tag.className = 'chat-hit-tag';
+        tag.textContent = '语义';
+        row.appendChild(tag);
+      }
+      item.appendChild(row);
+      wrap.appendChild(item);
+      listEl.appendChild(wrap);
+      const open = () => { if (typeof opts.onOpenHit === 'function') opts.onOpenHit(h); };
+      item.addEventListener('click', open);
+      item.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+      });
+    });
+  };
+
   C.renderList = function (listEl, chats, opts = {}) {
     const sorted = [...chats].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.updatedAt || 0) - (a.updatedAt || 0));
     const prevInput = document.getElementById('chat-search-input');
@@ -263,6 +348,8 @@
       keyword = searchInput.value;
       C._searchKeyword = keyword;
       renderItems();
+      // 服务端全文搜索:本地过滤之外再问一次服务端(防抖,取消上一次未返回的请求)
+      if (typeof opts.onKeyword === 'function') opts.onKeyword(keyword);
     });
   };
 

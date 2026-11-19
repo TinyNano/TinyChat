@@ -13,6 +13,9 @@ require_once __DIR__ . '/lib/web.php';
 require_once __DIR__ . '/lib/tasks.php';
 require_once __DIR__ . '/lib/oauth.php';
 require_once __DIR__ . '/lib/updater.php';
+require_once __DIR__ . '/lib/search.php';
+require_once __DIR__ . '/lib/devices.php';
+require_once __DIR__ . '/lib/semantic.php';
 
 tc_send_cors();
 
@@ -152,6 +155,8 @@ function tc_send_page($file) {
 function tc_dispatch($method, $path) {
     $routes = array(
         array('GET', '#^/api/config$#', 'tc_api_public_config_wrap'),
+        // 内置图形验证码:人机验证(captchaProvider=builtin)时前台各入口拉新挑战
+        array('GET', '#^/api/captcha/new$#', 'tc_api_captcha_new'),
         array('GET', '#^/api/env-check$#', 'tc_api_env_check'),
         array('POST', '#^/api/setup$#', 'tc_api_setup'),
         array('POST', '#^/api/auth/register$#', 'tc_api_register'),
@@ -191,6 +196,11 @@ function tc_dispatch($method, $path) {
         array('GET', '#^/api/me/apikeys$#', 'tc_api_me_apikeys_list'),
         array('POST', '#^/api/me/apikeys$#', 'tc_api_me_apikeys_create'),
         array('DELETE', '#^/api/me/apikeys/([^/]+)$#', 'tc_api_me_apikeys_delete'),
+        // 登录设备管理(设置 → 账户)
+        array('GET', '#^/api/me/devices$#', 'tc_api_me_devices'),
+        array('DELETE', '#^/api/me/devices$#', 'tc_api_me_devices_revoke_others'),
+        array('DELETE', '#^/api/me/devices/([^/]+)$#', 'tc_api_me_device_revoke'),
+        array('POST', '#^/api/me/devices/revoke-all$#', 'tc_api_me_devices_revoke_all'),
         array('GET', '#^/api/admin/invites$#', 'tc_api_admin_invites_list'),
         array('POST', '#^/api/admin/invites$#', 'tc_api_admin_invites_create'),
         array('DELETE', '#^/api/admin/invites/([^/]+)$#', 'tc_api_admin_invites_delete'),
@@ -206,6 +216,12 @@ function tc_dispatch($method, $path) {
         array('POST', '#^/api/providers/([^/]+)/key$#', 'tc_api_reveal_provider_key'),
         array('POST', '#^/api/providers/([^/]+)$#', 'tc_api_update_provider'),
         array('DELETE', '#^/api/providers/([^/]+)$#', 'tc_api_delete_provider'),
+        // 会话搜索服务端化(SQLite FTS5);主机没编译 FTS5 时 enabled=false,前端退回本地过滤
+        array('GET', '#^/api/chats/search$#', 'tc_api_chats_search'),
+        // 语义搜索(Embeddings):后台开启并指定供应商后可用
+        array('GET', '#^/api/me/semantic$#', 'tc_api_me_semantic'),
+        array('POST', '#^/api/me/semantic/index$#', 'tc_api_me_semantic_index'),
+        array('DELETE', '#^/api/chats/search/index$#', 'tc_api_chats_search_reindex'),
         array('GET', '#^/api/sync/chats$#', 'tc_api_sync_get_chats'),
         array('POST', '#^/api/sync/chats$#', 'tc_api_sync_save_chats'),
         array('DELETE', '#^/api/sync/chats$#', 'tc_api_sync_clear_chats'),
@@ -308,6 +324,7 @@ function tc_dispatch($method, $path) {
         array('POST', '#^/api/admin/codes/prune$#', 'tc_api_admin_prune_codes'),
         array('POST', '#^/api/admin/codes/fixed$#', 'tc_api_admin_create_fixed_code'),
         array('POST', '#^/api/admin/settings/test-email$#', 'tc_api_admin_test_email'),
+        array('POST', '#^/api/admin/settings/captcha-test$#', 'tc_api_admin_captcha_test'),
         array('POST', '#^/api/admin/settings/smtp-reveal$#', 'tc_api_admin_smtp_reveal'),
         array('GET', '#^/api/admin/settings/mail-template-defaults$#', 'tc_api_admin_mail_template_defaults'),
         array('GET', '#^/api/admin/model-meta$#', 'tc_api_admin_model_meta_list'),
@@ -428,6 +445,8 @@ function tc_fail_public_config($reason) {
         'demoExpireMinutes' => 10,
         'guestEnabled' => false,
         'guestRounds' => 3,
+        // DB 故障兜底:人机验证按未启用下发,前台不渲染验证组件(此时登录注册本就不可用)
+        'captcha' => array('provider' => 'none', 'siteKey' => '', 'login' => false, 'register' => false, 'reset' => false, 'guest' => false),
     ));
     exit;
 }

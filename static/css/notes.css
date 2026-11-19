@@ -1487,3 +1487,59 @@
   .ns-expire { flex-direction: column; align-items: stretch; gap: 6px; }
   .ns-expire select { width: 100%; }
 }
+
+/* 反向链接面板(notes.js renderBacklinks):挂在预览区下方的卡片,有入链/出链才出现 */
+.notes-backlinks {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--bg-surface-2, var(--bg-surface));
+  font-size: 0.893rem;
+}
+.notes-backlinks:empty { display: none; }
+.nb-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.nb-head-out { margin-top: 10px; }
+.nb-count {
+  font-weight: 500;
+  font-size: 0.786rem;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+}
+.nb-list { display: flex; flex-direction: column; gap: 4px; }
+.nb-item { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.nb-link {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  padding: 1px 2px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.nb-link:hover { text-decoration: underline; }
+.nb-excerpt {
+  color: var(--text-tertiary);
+  font-size: 0.821rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nb-broken { color: var(--text-tertiary); font-size: 0.821rem; }
+.nb-none { color: var(--text-tertiary); font-size: 0.821rem; line-height: 1.5; }

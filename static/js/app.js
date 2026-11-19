@@ -1111,6 +1111,129 @@ function liveMessage(chat, msg) {
 // API 对话是否显示在列表:用户偏好(默认开启),关闭后列表只显示网页端对话
 function showApiChats() { return !!uiPref('showApiChats', true); }
 function isApiChat(c) { return !!(c && c.apiKey); }
+// ---- 会话搜索服务端化 ----
+// 本地过滤只覆盖「这台浏览器上的会话」:隐私模式下没同步的、别的设备上聊的、量大后被
+// 本地裁剪掉的都搜不到。输入关键词时并行问一次 GET /api/chats/search(FTS5),
+// 命中的会话并进列表;点开本地没有的那条时,先按 id 去云端把会话取回来。
+// 服务端返回 enabled=false(主机没 FTS5 / 后台关闭 / 隐私模式)或请求失败时,
+// 结果与改动前完全一致 —— 只剩本地过滤。
+const chatSearch = { kw: '', hits: [], on: false, seq: 0, timer: null, semantic: false, merged: false };
+function chatSearchActive() { return chatSearch.on; }
+function resetChatSearch() {
+  chatSearch.kw = '';
+  chatSearch.hits = [];
+  chatSearch.on = false;
+  chatSearch.semantic = false;
+  chatSearch.merged = false;
+  chatSearch.seq++;
+  if (chatSearch.timer) { clearTimeout(chatSearch.timer); chatSearch.timer = null; }
+}
+
+// ---- 语义搜索(Embeddings,后台开启后可用)----
+// 关键词搜 FTS5(引用/代码/精确术语),语义搜向量(意思相近的会话)。两者都返回时按其 id 去重,
+// 语义命中排在后面并标注「语义」,避免把精确命中挤下去。
+async function fetchSemanticChats(kw, seq) {
+  if (!state.token || !(state.semanticEnabled)) return;
+  try {
+    // 会话索引懒建:服务端在 openai-chat 这里只做检索,索引由客户端触发(它知道自己有哪些会话)
+    if (!state._semanticIndexed) {
+      state._semanticIndexed = true;
+      api('/api/me/semantic/index', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'chats' }) })
+        .catch(() => { state._semanticIndexed = false; });
+      return;   // 索引在后台建,这次先用关键词结果
+    }
+    const r = await api('/api/me/semantic?kind=chats&q=' + encodeURIComponent(kw));
+    const d = await r.json().catch(() => ({}));
+    if (seq !== chatSearch.seq || !d || !Array.isArray(d.hits) || !d.hits.length) return;
+    const seen = {};
+    chatSearch.hits.forEach((h) => { seen[h.id] = true; });
+    const extra = [];
+    d.hits.forEach((h) => {
+      if (!h || !h.id || seen[h.id]) return;
+      seen[h.id] = true;
+      const chat = (state.chats || []).find((c) => c.id === h.id);
+      extra.push({ id: h.id, title: (chat && chat.title) || '对话', snippet: '语义相关：' + String(h.text || '').slice(0, 80), semantic: true });
+    });
+    if (!extra.length) return;
+    chatSearch.hits = chatSearch.hits.concat(extra);
+    chatSearch.on = true;
+    chatSearch.semantic = true;
+    if (state._searchKeyword && state._searchKeyword.trim() === kw) renderChatList();
+  } catch (e) { /* 语义检索失败只影响结果数量,不打扰用户 */ }
+}
+function fetchChatSearch(kw) {
+  const q = String(kw || '').trim();
+  const seq = ++chatSearch.seq;
+  if (!q || !state.token) {
+    chatSearch.hits = [];
+    if (chatSearch.on) { chatSearch.on = false; renderChatList(); }
+    return;
+  }
+  // 短查询(1~2 个字符)服务端也会走 LIKE 兜底,不在这里拦截
+  api('/api/chats/search?q=' + encodeURIComponent(q) + '&limit=40').then(async (r) => {
+    if (!r.ok) throw new Error('search ' + r.status);
+    return r.json();
+  }).then((d) => {
+    // 只认最新一次请求的结果:用户已经换了关键词时,旧响应晚到不能盖掉新的
+    if (seq !== chatSearch.seq) return;
+    if (!d || d.enabled === false) {
+      chatSearch.hits = [];
+      if (chatSearch.on) { chatSearch.on = false; renderChatList(); }
+      return;
+    }
+    chatSearch.hits = Array.isArray(d.hits) ? d.hits : [];
+    chatSearch.on = chatSearch.hits.length > 0;
+    chatSearch.merged = false;
+    if (state._searchKeyword && state._searchKeyword.trim() === q) renderChatList();
+    // 关键词结果到手后,再补一轮语义结果(两路并行发起、先后到达,互不覆盖)
+    fetchSemanticChats(q, seq);
+  }).catch(() => {
+    // 搜索失败退回本地过滤(不打扰用户:输入搜索框时弹个报错只会更烦)
+    if (seq !== chatSearch.seq) return;
+    chatSearch.hits = [];
+    if (chatSearch.on) { chatSearch.on = false; renderChatList(); }
+  });
+}
+function scheduleChatSearch(kw) {
+  chatSearch.kw = kw;
+  if (chatSearch.timer) clearTimeout(chatSearch.timer);
+  chatSearch.timer = setTimeout(() => {
+    chatSearch.timer = null;
+    fetchChatSearch(kw);
+  }, 260);
+}
+// 打开一条搜索结果:本机有就直接打开;没有(别的设备上聊的 / 本机没同步下来)就先去云端取
+async function openChatSearchHit(h) {
+  const id = h && h.id ? String(h.id) : '';
+  if (!id) return;
+  if (!(state.chats || []).some((c) => c.id === id)) {
+    try {
+      const r = await api('/api/sync/chats');
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && Array.isArray(d.chats)) {
+        const prevId = state.currentChatId;
+        const prevStamp = chatViewStamp((state.chats || []).find((c) => c.id === prevId) || null);
+        state.chats = mergeChatLists(d.chats, state.chats || []);
+        state.chatRevision = Number(d.revision) || state.chatRevision || 0;
+        saveChats();
+        renderChatList();
+        const next = (state.chats || []).find((c) => c.id === state.currentChatId) || null;
+        if (state.currentChatId !== prevId || chatViewStamp(next) !== prevStamp) renderMessages();
+      }
+    } catch (e) { /* 取不到就按下面的提示处理 */ }
+  }
+  const chat = (state.chats || []).find((c) => c.id === id);
+  if (!chat) { toast('这条对话已不在云端了', true); return; }
+  // 打开一条搜索结果 = 明确退出搜索态,否则列表停在搜索结果上,侧栏高亮与当前会话对不上
+  resetChatSearch();
+  if (state.streaming) stopStreaming();
+  state.currentChatId = chat.id;
+  resetNoteMentions();
+  state._scrollHistoryToBottom = true;
+  if (chat._visibleCount != null) delete chat._visibleCount;
+  renderChatList(); renderMessages(); resetComposer(); updateAssistantChip();
+}
+
 function visibleChats() {
   const all = state.chats || [];
   return showApiChats() ? all : all.filter((c) => !isApiChat(c));
@@ -1119,13 +1242,24 @@ function renderChatList() {
   const list = $('chat-list');
   list.innerHTML = '';
   if (!window.OCConversations || !list) { renderChatListSimple(list); return; }
+  // 服务端全文搜索有结果:改画搜索结果(本地过滤查不到别的设备的会话)
+  if (chatSearchActive()) {
+    window.OCConversations.searchList(list, chatSearch.kw, chatSearch.hits, {
+      currentId: state.currentChatId,
+      onKeyword: (kw) => { state._searchKeyword = kw; scheduleChatSearch(kw); },
+      onOpenHit: (h) => { openChatSearchHit(h); },
+    });
+    return;
+  }
   window.OCConversations.renderList(list, visibleChats(), {
+    onKeyword: (kw) => scheduleChatSearch(kw),
     currentId: state.currentChatId,
     // 开放 API 调用产生的会话要在每个时间段里单独成组(「今天 API」紧跟「今天」)。
     // 判定口径与「显示 API 对话」开关共用同一处,免得两处各写一份、日后漂移。
     isApiChat,
     onSelect: (c) => {
       if (state.streaming) { stopStreaming(); }
+      resetChatSearch();
       state.currentChatId = c.id;
       resetNoteMentions();
       state._scrollHistoryToBottom = true;
@@ -1299,6 +1433,7 @@ function findBlankChat() {
 }
 function newChat(opts) {
   if (state.streaming) { stopStreaming(); }
+  resetChatSearch();
   if (window.OCGroup && typeof window.OCGroup.setMode === 'function') window.OCGroup.setMode('simple');
   const existing = findBlankChat();
   if (existing) {
@@ -1456,6 +1591,8 @@ function renderMessages() {
   const startIdx = Math.max(0, msgs.length - chat._visibleCount);
   for (let i = startIdx; i < msgs.length; i++) {
     if (msgs[i] && msgs[i].role === 'system') continue;
+    // 工具结果已展示在发起调用的那条 assistant 气泡的 chip 里,不单独成气泡
+    if (isToolMessage(msgs[i])) continue;
     box.appendChild(buildMsgNode(msgs[i], chat, i));
   }
   renderChatToc();
@@ -2049,7 +2186,24 @@ function buildMsgNode(m, chat, idx) {
       contentDiv.appendChild(root);
       // 历史数据里被同步截断的 data 图片只剩半截 base64,渲染出来就是一屏乱码;
       // 助手消息没有 attachments 可重建,这里把残片收成一句说明。
-      window.OCRenderer.renderInto(root, stripBrokenDataImages(m.content || ''));
+      // 纯工具调用的一轮(模型只发了 tool_calls、没有正文):正文区先放一句摘要,
+      // 不让气泡空着(否则用户只看到一片空白,以为模型没回话)
+      let safeBody = stripBrokenDataImages(m.content || '');
+      if (!String(safeBody).trim() && window.OCTools && window.OCTools.hasCalls(m)) {
+        safeBody = escapeHtml(window.OCTools.skeleton(m));
+      }
+      if (window.OCRenderer && window.OCRenderer.renderHtml) {
+        // 先出 HTML、再拼工具 chip、最后统一增强:顺序反过来时 chip 之后拼进去的部分
+        // (代码块复制/公式/灯箱)永远拿不到增强。
+        root.innerHTML = window.OCRenderer.renderHtml(safeBody);
+        if (window.OCTools && window.OCTools.hasCalls(m)) window.OCTools.renderChips(root, m.toolCalls, toolResultsFor(chat, m));
+        window.OCRenderer.enhance(root);
+      } else if (window.OCRenderer) {
+        window.OCRenderer.renderInto(root, safeBody);
+        if (window.OCTools && window.OCTools.hasCalls(m)) window.OCTools.renderChips(root, m.toolCalls, toolResultsFor(chat, m));
+      } else {
+        root.textContent = safeBody;
+      }
       highlightGroupMentions(root, chat);
       // HTML/SVG 代码块附加「在 Artifacts 中打开」按钮
       if (window.OCMultimodal && window.OCMultimodal.enhanceArtifactButtons) {
@@ -2539,7 +2693,9 @@ function outgoingMessages(chatMessages, chat) {
     }
     source = (priorUser ? [priorUser] : []).concat(source.slice(baselineAt));
   }
-  const msgs = source.filter((m) => m && m.role !== 'system');
+  // 工具结果(role:'tool')要跟它的 assistant 调用一起发:被上下文窗口裁掉时,
+  // 留下的是「有 tool_calls 没有结果的 assistant」,上游会以 400 拒绝整段历史。
+  const msgs = withToolPairs(source.filter((m) => m && m.role !== 'system'));
   const limit = contextLimitNow();
   let kept = msgs.length > limit ? msgs.slice(-limit) : msgs;
   // 模型的上下文窗口来自「模型元数据」表(随模型清单下发),再做一轮 token 预算裁剪:
@@ -2558,7 +2714,7 @@ function outgoingMessages(chatMessages, chat) {
       total -= costs[drop];
       drop++;
     }
-    if (drop > 0) kept = kept.slice(drop);
+    if (drop > 0) kept = withToolPairs(kept.slice(drop));
   }
   const prompt = chatSystemPrompt(chat);
   const out = prompt ? [{ role: 'system', content: prompt }].concat(kept) : kept;
@@ -2712,7 +2868,7 @@ function buildRequestBody(chatMessages, format, chat, extra) {
       model: state.currentModel,
       stream: state.streamToggle,
       max_tokens: cap,
-      prompt: head + msgs.filter((m) => m.role !== 'system').map((m) => (m.role === 'user' ? 'User: ' : 'Assistant: ') + flattenApiContent(messageApiContent(m, format))).join('\n\n'),
+      prompt: head + msgs.filter((m) => m.role !== 'system' && m.role !== 'tool').map((m) => (m.role === 'user' ? 'User: ' : 'Assistant: ') + flattenApiContent(toolFlattenedContent(m, format))).join('\n\n'),
     });
     if (state.currentProviderId) bodyC.providerId = state.currentProviderId;
     return stampContext(bodyC, msgs);
@@ -2721,7 +2877,7 @@ function buildRequestBody(chatMessages, format, chat, extra) {
   const body = applyReasoningToBody({
     model: state.currentModel,
     stream: state.streamToggle,
-    messages: msgs.map((m) => ({ role: m.role, content: messageApiContent(m, format) })),
+    messages: msgs.map((m) => chatApiMessage(m, format)),
   }, format);
   if (state.currentProviderId) body.providerId = state.currentProviderId;
   const ready = attachWebSearchFlag(body);
@@ -2730,6 +2886,30 @@ function buildRequestBody(chatMessages, format, chat, extra) {
   fitThinkingBudget(ready, cap);
   if (extra && extra.continueFrom) ready.webSearch = 'off';
   return stampContext(ready, msgs);
+}
+// chat 格式的单条消息:普通消息不变;带工具调用的 assistant 回传 tool_calls,
+// role:'tool' 原样回传 tool_call_id + 结果内容。
+function chatApiMessage(m, format) {
+  if (m && m.role === 'tool') {
+    const api = window.OCTools ? window.OCTools.toApiMessage(m) : null;
+    if (api) return api;
+    return { role: 'user', content: '工具结果：' + String(m.content || '') };
+  }
+  const content = messageApiContent(m, format);
+  if (window.OCTools) {
+    const api = window.OCTools.toApiMessage(m, content);
+    if (api) return api;
+  }
+  return { role: m.role, content: content };
+}
+// 非 chat 格式(anthropic / responses / completions)没有工具协议:把调用过程写回正文
+function toolFlattenedContent(m, format) {
+  const content = messageApiContent(m, format);
+  if (!window.OCTools || !window.OCTools.hasCalls(m)) return content;
+  if (Array.isArray(content)) return content;   // 多模态部件里没有可拼的位置,保持原样
+  const lines = m.toolCalls.map((c) => '（调用工具 ' + ((c.function && c.function.name) || '') + '，参数：' + ((c.function && c.function.arguments) || '{}') + '）');
+  const text = typeof content === 'string' ? content : '';
+  return (text ? text + '\n' : '') + lines.join('\n');
 }
 function stampContext(body, msgs) {
   body._contextCount = msgs.contextCount || 0;
@@ -2765,6 +2945,56 @@ function citationsFromResponse(resp) {
 function applyCitations(assistantMsg, resp) {
   const cites = citationsFromResponse(resp);
   if (cites.length) assistantMsg.citations = cites;
+}
+
+// ---- 工具调用(Function calling)----
+// 捕获:非流式响应里 message.tool_calls;流式在 handleSseChunk 里按 index 累加。
+// 只认 chat 格式 —— 其余格式(anthropic/responses)的 tools 形状不同,前端不做猜测。
+function applyToolCalls(assistantMsg, data, format) {
+  if (!assistantMsg || !data || format !== 'chat') return;
+  const choice = data.choices && data.choices[0];
+  const msg = choice && (choice.message || choice.delta);
+  if (!msg || !window.OCTools) return;
+  const calls = window.OCTools.fromMessage(msg);
+  if (calls.length) assistantMsg.toolCalls = calls;
+  if (choice && choice.finish_reason) assistantMsg.finishReason = String(choice.finish_reason);
+  if (assistantMsg.toolCalls && assistantMsg.toolCalls.length && !assistantMsg.finishReason) assistantMsg.finishReason = 'tool_calls';
+}
+
+// 取某条 assistant 消息之后紧邻的 role:'tool' 消息(工具结果),供 chip 显示状态与输出
+function toolResultsFor(chat, msg) {
+  if (!chat || !msg || !Array.isArray(chat.messages)) return [];
+  const calls = msg.toolCalls || [];
+  if (!calls.length) return [];
+  const ids = {};
+  calls.forEach((c) => { if (c && c.id) ids[c.id] = true; });
+  const idx = chat.messages.indexOf(msg);
+  const out = [];
+  for (let i = idx + 1; i < chat.messages.length; i++) {
+    const m = chat.messages[i];
+    if (!m || m.role !== 'tool') break;
+    if (ids[m.tool_call_id]) out.push(m);
+  }
+  return out;
+}
+
+// 工具消息本身不单独成气泡:它的内容已经在发起它的 assistant 气泡里的 chip 中展示。
+// 「只有工具结果」的消息仍在历史里(发请求要用),渲染时直接跳过。
+function isToolMessage(m) { return !!(m && m.role === 'tool'); }
+
+// 让 role:'tool' 的消息跟着发起它的 assistant 走:assistant 被裁掉时,它的结果一起走;
+// 结果缺失(被裁或被删)的 assistant 去掉 tool_calls,退化成普通回复而不是坏历史。
+function withToolPairs(list) {
+  const out = list.filter((m) => m && m.role !== 'tool');
+  const hasResult = {};
+  list.forEach((m) => { if (m && m.role === 'tool' && m.tool_call_id) hasResult[m.tool_call_id] = m; });
+  out.forEach((m) => {
+    if (!m || m.role !== 'assistant' || !Array.isArray(m.toolCalls) || !m.toolCalls.length) return;
+    const keep = m.toolCalls.filter((c) => c && c.id && hasResult[c.id]);
+    if (!keep.length) { delete m.toolCalls; return; }
+    m.toolCalls = keep;
+  });
+  return out;
 }
 
 function applyFollowUp(q) {
@@ -3202,6 +3432,7 @@ async function streamRequest(format, body, chat, assistantMsg) {
       const text = await resp.text();
       const data = JSON.parse(text);
       assistantMsg.content = extractText(data, format);
+      applyToolCalls(assistantMsg, data, format);
       // @ 到生图模型时后端会改走生图接口,返回 {images:[...]} 而不是 choices。
       // 只按文本取会是空串,标签里就剩一个没有任何内容的空气泡:把图片渲染进这次回答。
       if (!assistantMsg.content && data && Array.isArray(data.images) && data.images.length) {
@@ -3558,6 +3789,8 @@ function handleSseChunk(chunk, format, assistantMsg) {
     captureFinishReason(j, format, assistantMsg);
     const delta = getDelta(j, format);
     if (delta) assistantMsg.content += delta;
+    // 工具调用:OpenAI 的 tool_calls 分片按 index 累加(见 OCTools),结果由调用方回填
+    if (window.OCTools && window.OCTools.applyStreamDelta(assistantMsg, j)) assistantMsg._toolCallsDirty = true;
   });
   absorbThinkTags(assistantMsg);
 }
@@ -3885,6 +4118,7 @@ async function requestAssistantReply(chat, userMsg, extra) {
       if (!r.ok) throw new Error((data.error && data.error.message) || ('HTTP ' + r.status));
       applyCitations(assistantMsg, r);
       assistantMsg.content = extractText(data, format);
+      applyToolCalls(assistantMsg, data, format);
       const think = extractReasoning(data, format);
       if (think) assistantMsg.reasoning = think;
       absorbThinkTags(assistantMsg, true);
@@ -4349,6 +4583,9 @@ async function refreshMe() {
       state.usage = Array.isArray(data.usage) ? data.usage : [];
       // 拓展功能的按人可用性(仅管理员 / 仅名单):落盘并广播,让已渲染的入口重判
       if (data.features && window.OCFeatures) window.OCFeatures.set(data.features);
+      // 语义搜索(后台开启 embeddings 后可用):会话搜索里多一路「意思相近」的结果
+      state.semanticEnabled = !!(data.semantic && data.semantic.enabled);
+      if (window.OCNotes && window.OCNotes.setSemanticEnabled) window.OCNotes.setSemanticEnabled(state.semanticEnabled);
       renderUser();
       loadAccountPackages();
       // 收藏亮星缓存 + 记忆配置(登录态下);菜单显隐随登录态刷新
@@ -4721,6 +4958,7 @@ function openSettings(tab) {
   try { renderAccountPanel(); } catch (e) { console.error(e); }
   try { syncPrefsPanel(); } catch (e) { console.error(e); }
   try { refreshSettingsSyncStatus(); } catch (e) { console.error(e); }
+  try { loadDevices(); } catch (e) { console.error(e); }
   try { loadAccountPackages(); } catch (e) { console.error(e); }
   // tab 可能来自事件对象(MouseEvent),必须校验为字符串;不带参数时默认落在「账户」
   switchSettingsTab(typeof tab === 'string' && tab ? tab : 'account');
@@ -4865,6 +5103,94 @@ function renderAccountPanel() {
     totpBtn.classList.toggle('primary', !on);
   }
 }
+
+// ============ 登录设备(设置 → 账户) ============
+// 服务端维护每账号最近 20 次登录(见 lib/devices.php)。这里只做展示与「退出该设备」:
+// 踢自己 = 退出登录;踢别的设备后对方下一次请求就会 401 并被引导重新登录。
+let devicesLoading = false;
+function fmtDeviceTime(ts) {
+  const t = Number(ts) || 0;
+  if (!t) return '';
+  const d = new Date(t);
+  const diff = Date.now() - t;
+  if (diff < 60000) return '刚刚活跃';
+  if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前活跃';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前活跃';
+  return d.toLocaleDateString('zh-CN') + ' ' + d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+function renderDevices(list, limit) {
+  const box = $('acc-device-list');
+  if (!box) return;
+  if (!list.length) {
+    box.innerHTML = '<p class="muted small" style="margin:8px 0 0">没有可显示的设备记录（本次登录尚未登记，或已在别处全部下线）。</p>';
+    return;
+  }
+  box.innerHTML = list.map((d) => {
+    const title = escapeHtml(d.label || '未知设备') + (d.current ? ' <span class="badge">当前设备</span>' : '');
+    const meta = [d.ip ? escapeHtml(d.ip) : '未知 IP', '登录于 ' + new Date(d.createdAt).toLocaleString('zh-CN'), fmtDeviceTime(d.lastActiveAt)]
+      .filter(Boolean).join(' · ');
+    return '<div class="row-between" data-device="' + escapeHtml(d.id) + '" style="padding:6px 0;border-bottom:1px solid var(--hairline)">'
+      + '<div style="min-width:0"><div>' + title + '</div>'
+      + '<div class="muted small" style="word-break:break-all">' + meta + '</div>'
+      + (d.ua ? '<div class="muted small" style="opacity:.7;word-break:break-all">' + escapeHtml(d.ua) + '</div>' : '')
+      + '</div>'
+      + '<button class="btn small' + (d.current ? '' : ' danger') + '" data-revoke="' + escapeHtml(d.id) + '" type="button">'
+      + (d.current ? '退出登录' : '退出该设备') + '</button></div>';
+  }).join('');
+  const note = $('acc-device-note');
+  if (note) note.textContent = '最多保留最近 ' + (limit || 20) + ' 次登录记录';
+  box.querySelectorAll('[data-revoke]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('[data-device]');
+      const isCur = !!(row && row.textContent.indexOf('当前设备') >= 0);
+      const ok = window.OCUI && OCUI.confirm
+        ? await OCUI.confirm({
+          title: isCur ? '退出登录' : '退出该设备',
+          message: isCur ? '这台设备将退出登录，需要重新输入密码。' : '该设备上的登录会立即失效，需要重新输入密码。',
+          danger: !isCur, confirmText: isCur ? '退出登录' : '退出',
+        })
+        : confirm(isCur ? '确认退出登录？' : '确认让该设备下线？');
+      if (!ok) return;
+      try {
+        const r = await api('/api/me/devices/' + encodeURIComponent(btn.dataset.revoke), { method: 'DELETE' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return toast((d.error && d.error.message) || '操作失败', true);
+        if (d.current) { logout(); return; }
+        toast('该设备已退出登录');
+        loadDevices();
+      } catch (e) { toast('操作失败: ' + e.message, true); }
+    });
+  });
+}
+function loadDevices() {
+  if (devicesLoading) return;
+  const box = $('acc-device-list');
+  if (!box || !state.token) return;
+  devicesLoading = true;
+  api('/api/me/devices').then(async (r) => {
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((d.error && d.error.message) || ('HTTP ' + r.status));
+    renderDevices(Array.isArray(d.devices) ? d.devices : [], d.limit);
+  }).catch((e) => {
+    if (box) box.innerHTML = '<p class="muted small" style="margin:8px 0 0">设备列表读取失败：' + escapeHtml(e.message || '') + '</p>';
+  }).finally(() => { devicesLoading = false; });
+}
+(function initDevices() {
+  const others = $('acc-device-revoke-others');
+  if (others) others.addEventListener('click', async () => {
+    const ok = window.OCUI && OCUI.confirm
+      ? await OCUI.confirm({ title: '退出其它全部设备', message: '除这台设备外的所有登录都会失效。', danger: true, confirmText: '全部退出' })
+      : confirm('确认退出其它全部设备？');
+    if (!ok) return;
+    try {
+      const r = await api('/api/me/devices', { method: 'DELETE' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return toast((d.error && d.error.message) || '操作失败', true);
+      toast(d.removed ? ('已退出 ' + d.removed + ' 台设备') : '没有其它设备在线');
+      loadDevices();
+    } catch (e) { toast('操作失败: ' + e.message, true); }
+  });
+})();
 
 // ============ 辅助任务模型选择(跟进建议/对话命名) ============
 // 候选只含对话模型;生图/生视频模型不参与文本辅助任务。
@@ -9090,6 +9416,8 @@ let AUTH_MODAL_BOUND = false;
 let AUTH_MODAL_VIEW = 'login';
 let AUTH_MODAL_CFG = null;
 let AUTH_MODAL_CFG_LOADING = false;
+// 人机验证:已挂过组件的弹窗视图(login/register/reset),避免重复拉挑战
+const AM_CAP_MOUNTED = {};
 
 function amError(msg) {
   const err = $('auth-modal-error');
@@ -9150,6 +9478,21 @@ function amApplyConfig() {
   if (window.OCUI && window.OCUI.renderOauthIcons) {
     window.OCUI.renderOauthIcons($('am-oauth'), $('am-oauth-icons'), cfg.oauth && cfg.oauth.providers);
   }
+  // 人机验证:配置就绪后按当前视图挂验证组件(其余视图切过去时再挂)
+  amCaptchaApply();
+}
+// 登录弹窗的人机验证挂载:视图与入口一一对应(login/register/forgot→reset)。
+// 配置未就绪时先不挂(amLoadConfig 回来后会随 amApplyConfig 再走一遍);
+// 已挂过的不重复挂——挑战是一次性的,重挂会把用户没提交的答案冲掉。
+function amCaptchaApply() {
+  const oc = window.OCUI;
+  if (!(oc && oc.captchaMount)) return;
+  const cfg = AUTH_MODAL_CFG || state.config || null;
+  const cap = cfg && cfg.captcha ? cfg.captcha : null;
+  const entry = AUTH_MODAL_VIEW === 'register' ? 'register' : (AUTH_MODAL_VIEW === 'forgot' ? 'reset' : 'login');
+  if (!cap || AM_CAP_MOUNTED[entry]) return;
+  AM_CAP_MOUNTED[entry] = true;
+  oc.captchaMount(document.querySelector('[data-cap="' + entry + '"]'), cap, entry);
 }
 function amLoadConfig() {
   if (AUTH_MODAL_CFG_LOADING) return;   // 没配置时每次切视图都会走到这里,别重复请求
@@ -9182,12 +9525,15 @@ function openAuthModal(message) {
       const name = ($('am-name') && $('am-name').value.trim()) || '';
       const pass = ($('am-pass') && $('am-pass').value) || '';
       if (!name || !pass) return amError('请输入用户名和密码');
+      const oc = window.OCUI || null;
+      if (oc && oc.captchaEntryRequired && oc.captchaEntryRequired('login') && !(oc.captchaPayload && oc.captchaPayload('login'))) return amError('请先完成人机验证');
+      const capBody = (oc && oc.captchaPayload) ? (oc.captchaPayload('login') || {}) : {};
       const btn = $('am-login-btn');
       amBusy(btn, true, '登录');
       try {
         const r = await fetch(apiUrl('/api/auth/login'), {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, password: pass }),
+          body: JSON.stringify(Object.assign({ name, password: pass }, capBody)),
         });
         const d = await readJsonSafe(r);
         if (!r.ok) throw new Error((d.error && d.error.message) || '登录失败');
@@ -9203,6 +9549,8 @@ function openAuthModal(message) {
         amFinishLogin(d);
       } catch (ex) {
         amError(ex.message);
+        // 验证码一次性消费(提交即作废):失败后换新码再试
+        if (oc && oc.captchaReset) oc.captchaReset('login');
         amBusy(btn, false, '登录');
       }
     });
@@ -9213,18 +9561,21 @@ function openAuthModal(message) {
       const name = ($('am-reg-name') && $('am-reg-name').value.trim()) || '';
       const pass = ($('am-reg-pass') && $('am-reg-pass').value) || '';
       if (!name || !pass) return amError('请输入用户名和密码');
+      const oc = window.OCUI || null;
+      if (oc && oc.captchaEntryRequired && oc.captchaEntryRequired('register') && !(oc.captchaPayload && oc.captchaPayload('register'))) return amError('请先完成人机验证');
+      const capBody = (oc && oc.captchaPayload) ? (oc.captchaPayload('register') || {}) : {};
       const btn = $('am-register-btn');
       amBusy(btn, true, '注册并登录');
       try {
         const r = await fetch(apiUrl('/api/auth/register'), {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+          body: JSON.stringify(Object.assign({
             name: name,
             password: pass,
             email: ($('am-reg-email') && $('am-reg-email').value.trim()) || '',
             agreementAccepted: !!($('am-reg-agree') && $('am-reg-agree').checked),
             invite: ($('am-reg-invite') && $('am-reg-invite').value.trim()) || '',
-          }),
+          }, capBody)),
         });
         const d = await readJsonSafe(r);
         if (!r.ok) throw new Error((d.error && d.error.message) || '注册失败');
@@ -9233,6 +9584,7 @@ function openAuthModal(message) {
         amFinishLogin(d);
       } catch (ex) {
         amError(ex.message);
+        if (oc && oc.captchaReset) oc.captchaReset('register');
         amBusy(btn, false, '注册并登录');
       }
     });
@@ -9241,17 +9593,21 @@ function openAuthModal(message) {
     if (forgotForm) forgotForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const btn = $('am-forgot-btn');
+      const oc = window.OCUI || null;
+      if (oc && oc.captchaEntryRequired && oc.captchaEntryRequired('reset') && !(oc.captchaPayload && oc.captchaPayload('reset'))) return amError('请先完成人机验证');
+      const capBody = (oc && oc.captchaPayload) ? (oc.captchaPayload('reset') || {}) : {};
       amBusy(btn, true, '发送重置邮件');
       try {
         const r = await fetch(apiUrl('/api/auth/forgot-password'), {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: ($('am-forgot-email') && $('am-forgot-email').value.trim()) || '' }),
+          body: JSON.stringify(Object.assign({ email: ($('am-forgot-email') && $('am-forgot-email').value.trim()) || '' }, capBody)),
         });
         const d = await readJsonSafe(r);
         if (!r.ok) throw new Error((d.error && d.error.message) || '发送失败');
         amError('如果邮箱存在，重置链接已发送。');
       } catch (ex) {
         amError(ex.message);
+        if (oc && oc.captchaReset) oc.captchaReset('reset');
       } finally {
         amBusy(btn, false, '发送重置邮件');
       }
@@ -9274,6 +9630,53 @@ function openAuthModal(message) {
   amError(message || '');
   if (window.OCUI && window.OCUI.openModal) window.OCUI.openModal(modal);
   else modal.classList.remove('hidden');
+}
+// 游客人机验证卡片:后台对游客入口开启验证时,进站先出这张卡,完成后再自动建游客账号。
+// 返回 true = 游客账号已建好(token 已写入 state/localStorage);false = 跳过/超时/失败
+// (调用方退到只读首页,不阻塞站点)。卡片没有关闭按钮,「先随便看看」是唯一出口。
+function guestGateFlow(cfg) {
+  return new Promise((resolve) => {
+    const gate = $('guest-gate');
+    const capBox = document.querySelector('[data-cap="guest"]');
+    const errBox = $('guest-gate-error');
+    const oc = window.OCUI || null;
+    if (!gate || !capBox || !(oc && oc.captchaMount)) return resolve(false);
+    const ggError = (m) => { if (errBox) { errBox.textContent = m || ''; errBox.classList.toggle('hidden', !m); } };
+    oc.captchaMount(capBox, cfg && cfg.captcha, 'guest');
+    const done = (v) => {
+      if (window.OCUI && window.OCUI.closeModal) { try { window.OCUI.closeModal(gate); } catch (e) { /* 忽略 */ } }
+      gate.classList.add('hidden');
+      resolve(v);
+    };
+    const skip = $('guest-gate-skip');
+    if (skip) skip.addEventListener('click', (e) => { e.preventDefault(); done(false); });
+    const go = $('guest-gate-go');
+    if (go) go.addEventListener('click', async () => {
+      if (!(oc.captchaPayload && oc.captchaPayload('guest'))) { ggError('请先完成人机验证'); return; }
+      go.disabled = true;
+      go.textContent = '请稍候…';
+      try {
+        const r = await fetch(apiUrl('/api/auth/guest'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(oc.captchaPayload('guest') || {}),
+        });
+        const d = await readJsonSafe(r);
+        if (!r.ok || !d.token) throw new Error((d.error && d.error.message) || '验证未通过，请重试');
+        state.token = d.token;
+        localStorage.setItem('oc_token', d.token);
+        state.isGuest = true;
+        state.guestRounds = d.rounds || 0;
+        done(true);
+      } catch (ex) {
+        ggError(ex.message || '验证未通过，请重试');
+        if (oc.captchaReset) oc.captchaReset('guest');
+        go.disabled = false;
+        go.textContent = '进入体验';
+      }
+    });
+    if (window.OCUI && window.OCUI.openModal) window.OCUI.openModal(gate);
+    else gate.classList.remove('hidden');
+  });
 }
 function showGuestBar() {
   const bar = $('guest-bar');
@@ -9452,17 +9855,26 @@ function bootDone(mode) {
       cfg = await readJsonSafe(cr);
     } catch (e) { cfg = null; }
     if (cfg && cfg.guestEnabled) {
-      // 开启游客模式:为本次访客自动创建一个独立游客账号,便于后台管理
-      try {
-        const gr = await fetch(apiUrl('/api/auth/guest'), { method: 'POST' });
-        const gd = await readJsonSafe(gr);
-        if (gr.ok && gd.token) {
-          state.token = gd.token;
-          localStorage.setItem('oc_token', gd.token);
-          state.isGuest = true;
-          state.guestRounds = gd.rounds || 0;
-        }
-      } catch (e) { /* 落到只读首页 */ }
+      const capCfg = cfg && cfg.captcha ? cfg.captcha : null;
+      const capGuest = !!(capCfg && capCfg.guest && capCfg.provider && capCfg.provider !== 'none');
+      if (capGuest) {
+        // 游客入口开了人机验证:先出验证卡片,完成后再自动建游客账号
+        // (内置验证码必须由人输入答案,Turnstile 也可能有交互,静默建号必须让位)
+        const ok = await guestGateFlow(cfg);
+        if (!ok) { enterReadonlyHome(); bootDone('readonly'); return; }
+      } else {
+        // 开启游客模式:为本次访客自动创建一个独立游客账号,便于后台管理
+        try {
+          const gr = await fetch(apiUrl('/api/auth/guest'), { method: 'POST' });
+          const gd = await readJsonSafe(gr);
+          if (gr.ok && gd.token) {
+            state.token = gd.token;
+            localStorage.setItem('oc_token', gd.token);
+            state.isGuest = true;
+            state.guestRounds = gd.rounds || 0;
+          }
+        } catch (e) { /* 落到只读首页 */ }
+      }
     }
     if (!state.token) {
       // 未开启游客:直接显示对话主页(不再强制跳转登录页),点击输入框再弹登录

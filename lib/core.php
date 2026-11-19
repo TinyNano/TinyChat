@@ -6,7 +6,7 @@ if (!defined('TC_ROOT')) {
     define('TC_ROOT', dirname(__DIR__));
 }
 
-define('TC_VERSION', '2.1.1');
+define('TC_VERSION', '2.2.0');
 // 单篇笔记正文上限(字符)。超出时接口明确报错而不是静默截断。
 define('TC_NOTE_MAX_CHARS', 500000);
 // 敏感词库上限(去重后的条数)。达到上限后新增词条被丢弃,单个词条本身不截断。
@@ -384,6 +384,27 @@ $TC_SETTINGS_DEFAULTS = array(
     // 新用户 / 从未自选过主题的用户应用哪套主题包(default/chatgpt/block/claude);
     // 用户一旦自己选过主题,以后都以用户的选择为准
     'defaultThemePack' => 'default',
+    // ---- 人机验证 ----
+    // 验证方式:none=关闭;builtin=内置图形验证码(纯 PHP 生成 SVG,零外部依赖);
+    // turnstile=Cloudflare Turnstile(需在 Cloudflare 后台创建站点拿 siteKey/secretKey,
+    // 服务器需能访问 challenges.cloudflare.com,可配出站代理)。校验不通过一律拒绝(fail-closed)。
+    'captchaProvider' => 'none',
+    'captchaSiteKey' => '',
+    'captchaSecretKey' => '',
+    // 四个入口各自开关(仅在验证方式非 none 时生效)
+    'captchaOnLogin' => true,
+    'captchaOnRegister' => true,
+    'captchaOnReset' => true,
+    'captchaOnGuest' => true,
+    // ---- 语义搜索(Embeddings)----
+    // 关闭时一切照旧(会话搜索走 FTS5 关键词、问笔记走向量无关的关键词召回)。
+    // 开启后需要指定一个支持 /embeddings 的供应商与模型名(如 text-embedding-3-small /
+    // bge-m3)。索引由客户端在保存后触发,服务端只存向量并做余弦检索。
+    'semanticEnabled' => false,
+    'semanticProviderId' => '',
+    'semanticModel' => '',
+    // 会话搜索(FTS5)总开关:关闭后前端退回本地过滤
+    'chatSearchEnabled' => true,
 );
 $TC_SETTINGS_DEFAULTS['mailTemplates'] = tc_mail_default_templates();
 // 三个拓展功能的访问级别(全站 / 仅管理员 / 仅名单)与名单
@@ -1714,6 +1735,20 @@ function tc_normalize_settings($raw) {
     $s['quotaWarnBelow'] = min(100000, max(0, (int) (isset($s['quotaWarnBelow']) ? $s['quotaWarnBelow'] : 0)));
     $pack = strtolower(trim((string) (isset($s['defaultThemePack']) ? $s['defaultThemePack'] : 'default')));
     $s['defaultThemePack'] = in_array($pack, array('default', 'chatgpt', 'block', 'claude'), true) ? $pack : 'default';
+    // 人机验证:方式枚举钳制;站点键/密钥去空格限长;四个入口开关布尔化(未提交=维持默认 true)
+    $capMode = strtolower(trim((string) (isset($s['captchaProvider']) ? $s['captchaProvider'] : 'none')));
+    $s['captchaProvider'] = in_array($capMode, array('none', 'builtin', 'turnstile'), true) ? $capMode : 'none';
+    $s['captchaSiteKey'] = substr(trim((string) (isset($s['captchaSiteKey']) ? $s['captchaSiteKey'] : '')), 0, 200);
+    $s['captchaSecretKey'] = substr(trim((string) (isset($s['captchaSecretKey']) ? $s['captchaSecretKey'] : '')), 0, 200);
+    $s['captchaOnLogin'] = !array_key_exists('captchaOnLogin', $s) || !empty($s['captchaOnLogin']);
+    $s['captchaOnRegister'] = !array_key_exists('captchaOnRegister', $s) || !empty($s['captchaOnRegister']);
+    $s['captchaOnReset'] = !array_key_exists('captchaOnReset', $s) || !empty($s['captchaOnReset']);
+    $s['captchaOnGuest'] = !array_key_exists('captchaOnGuest', $s) || !empty($s['captchaOnGuest']);
+    // 语义搜索:供应商 ID / 模型名去空格限长;开关布尔化
+    $s['semanticEnabled'] = !empty($s['semanticEnabled']);
+    $s['semanticProviderId'] = substr(trim((string) (isset($s['semanticProviderId']) ? $s['semanticProviderId'] : '')), 0, 64);
+    $s['semanticModel'] = substr(trim((string) (isset($s['semanticModel']) ? $s['semanticModel'] : '')), 0, 120);
+    $s['chatSearchEnabled'] = !array_key_exists('chatSearchEnabled', $s) || !empty($s['chatSearchEnabled']);
     return $s;
 }
 
@@ -1869,6 +1904,8 @@ function tc_admin_settings_public($s, $forDemo = false) {
     if (!empty($out['webSearchBraveKey'])) $out['webSearchBraveKey'] = tc_mask_key($out['webSearchBraveKey']);
     if (!empty($out['webSearchJinaKey'])) $out['webSearchJinaKey'] = tc_mask_key($out['webSearchJinaKey']);
     if (!empty($out['mineruToken'])) $out['mineruToken'] = tc_mask_key($out['mineruToken']);
+    // Turnstile secret key 同掩码(保存时按 •• 跳过,不回写)
+    if (!empty($out['captchaSecretKey'])) $out['captchaSecretKey'] = tc_mask_key($out['captchaSecretKey']);
     // 第三方登录密钥掩码(前端回显用;保存时按 •• 跳过,不回写)
     if (!empty($out['oauthProviders']) && is_array($out['oauthProviders'])) {
         foreach ($out['oauthProviders'] as $pid => $row) {
@@ -2801,6 +2838,173 @@ function tc_rate_limit_check($key, $limitPerMin, $windowMs = 60000) {
     return $allowed;
 }
 
+// ---- 人机验证:内置图形验证码 + Cloudflare Turnstile ----
+// 设置:captchaProvider = none | builtin | turnstile,四个入口各自开关(captchaOnLogin 等)。
+// 校验不通过一律拒绝(fail-closed):验证码服务不可用时宁可挡住登录,也不静默放行。
+// (与限流器的 fail-open 相反——限流挡的是滥用,这里挡的是「管理员显式要求的验证」。)
+
+// 去混淆字符集:不含 0/O、1/I/L 等易混字符;比对不分大小写
+define('TC_CAPTCHA_CHARS', 'ABCDEFGHJKMNPQRSTUVWXYZ23456789');
+define('TC_CAPTCHA_LEN', 4);
+define('TC_CAPTCHA_TTL_MS', 3 * 60 * 1000);   // 挑战有效期 3 分钟
+define('TC_CAPTCHA_MAX_TRIES', 3);            // 单张码最多答错 3 次,超过作废
+
+// 内置验证码挑战存 data/captcha/{id}.json,一个验证码一个文件,
+// 读写复用 tc_json_mutate 的同一把锁(并发校验不会读到旧内容)。
+function tc_captcha_dir() {
+    $dir = tc_data_dir() . '/captcha';
+    if (!is_dir($dir)) @mkdir($dir, 0755, true);
+    return $dir;
+}
+
+// 挑战文件 3 分钟即过期;惰性清理仿 tc_rate_limit_gc(1/50 概率,删 1 小时未动的)
+function tc_captcha_gc() {
+    static $ran = false;
+    if ($ran) return;
+    $ran = true;
+    if (random_int(1, 50) !== 1) return;
+    $dir = tc_captcha_dir();
+    $cut = time() - 3600;
+    foreach ((array) @scandir($dir) as $f) {
+        if (substr((string) $f, -5) !== '.json') continue;
+        $full = $dir . '/' . $f;
+        if (@filemtime($full) < $cut) @unlink($full);
+    }
+}
+
+// 生成一张内置验证码。返回 array(id, svg);存储不可写(磁盘满/目录只读)返回 null,
+// 由端点转 503——fail-closed,发不出挑战就不能假装验证过了。
+function tc_captcha_new() {
+    tc_captcha_gc();
+    $chars = TC_CAPTCHA_CHARS;
+    $n = strlen($chars);
+    $answer = '';
+    for ($i = 0; $i < TC_CAPTCHA_LEN; $i++) $answer .= $chars[random_int(0, $n - 1)];
+    $id = bin2hex(random_bytes(16));
+    $file = tc_captcha_dir() . '/' . $id . '.json';
+    $stored = tc_json_mutate($file, function () use ($answer) {
+        return array('answer' => $answer, 'exp' => tc_now() + TC_CAPTCHA_TTL_MS, 'tries' => 0);
+    }, null);
+    if (!is_array($stored)) return null;
+    return array('id' => $id, 'svg' => tc_captcha_svg($answer));
+}
+
+// 纯 SVG 渲染(不依赖 GD 扩展):逐字符随机位移/旋转/字号抖动,
+// 叠噪声贝塞尔曲线与噪点。深色字符配浅底卡片(容器样式由前端控制)。
+function tc_captcha_svg($answer) {
+    $w = 132;
+    $h = 44;
+    $chars = preg_split('//u', (string) $answer, -1, PREG_SPLIT_NO_EMPTY);
+    $slot = ($w - 24) / max(1, count($chars));
+    $x = 12 + $slot * 0.2;
+    $texts = '';
+    foreach ($chars as $ch) {
+        $fs = random_int(23, 29);
+        $dy = random_int(-4, 4);
+        $rot = random_int(-24, 24);
+        $col = sprintf('#%02x%02x%02x', random_int(15, 90), random_int(15, 90), random_int(15, 90));
+        $texts .= '<text x="' . $x . '" y="' . (29 + $dy) . '" transform="rotate(' . $rot . ' ' . round($x + $fs * 0.35, 1) . ' ' . (27 + $dy) . ')" font-family="Georgia,\'Times New Roman\',serif" font-size="' . $fs . '" font-weight="bold" fill="' . $col . '">' . htmlspecialchars($ch) . '</text>';
+        $x += $slot;
+    }
+    $noise = '';
+    for ($i = 0; $i < 4; $i++) {
+        $c1x = random_int(12, $w - 12);
+        $c1y = random_int(0, $h);
+        $c2x = random_int(12, $w - 12);
+        $c2y = random_int(0, $h);
+        $y1 = random_int(4, $h - 4);
+        $y2 = random_int(4, $h - 4);
+        $ncol = sprintf('#%02x%02x%02x', random_int(110, 185), random_int(110, 185), random_int(110, 185));
+        $noise .= '<path d="M4 ' . $y1 . ' C ' . $c1x . ' ' . $c1y . ', ' . $c2x . ' ' . $c2y . ', ' . ($w - 4) . ' ' . $y2 . '" stroke="' . $ncol . '" stroke-width="1.4" fill="none" opacity="0.7"/>';
+    }
+    $dots = '';
+    for ($i = 0; $i < 24; $i++) {
+        $ncol = sprintf('#%02x%02x%02x', random_int(110, 190), random_int(110, 190), random_int(110, 190));
+        $dots .= '<circle cx="' . random_int(2, $w - 2) . '" cy="' . random_int(2, $h - 2) . '" r="' . (random_int(8, 16) / 10) . '" fill="' . $ncol . '" opacity="0.45"/>';
+    }
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' . $w . '" height="' . $h . '" viewBox="0 0 ' . $w . ' ' . $h . '" role="img" aria-label="验证码图片">'
+        . $noise . $dots . $texts . '</svg>';
+}
+
+// 校验内置验证码。返回 null = 通过;返回 string = 错误文案(端点拿去 tc_fail)。
+// 挑战一次性消费:答对即作废;答错累计 tries,超上限作废;过期/不存在/已消费同文案。
+function tc_captcha_verify($id, $answer) {
+    $id = strtolower(trim((string) $id));
+    if (!preg_match('/^[0-9a-f]{32}$/', $id)) return '请先完成人机验证';
+    $file = tc_captcha_dir() . '/' . $id . '.json';
+    $err = '';
+    tc_json_mutate($file, function ($cur) use (&$err, $answer) {
+        if (!is_array($cur) || empty($cur['answer']) || !empty($cur['consumed'])) {
+            $err = '验证码已失效，请刷新后重试';
+            return null;
+        }
+        if ((int) $cur['exp'] < tc_now()) {
+            $err = '验证码已过期，请刷新后重试';
+            return null;
+        }
+        if ((int) $cur['tries'] >= TC_CAPTCHA_MAX_TRIES) {
+            $err = '验证码错误次数过多，请刷新后重试';
+            return null;
+        }
+        if (!hash_equals((string) $cur['answer'], strtoupper(preg_replace('/[^A-Z0-9]/i', '', (string) $answer)))) {
+            $cur['tries'] = (int) $cur['tries'] + 1;
+            $err = '验证码不正确，请重试';
+            return $cur;
+        }
+        // 答对:锁内打上消费标记(并发第二个请求从此走「已失效」),文件留待 GC 清理
+        $err = '';
+        return array('consumed' => 1);
+    }, null);
+    if ($err === '') {
+        @unlink($file); // 锁外顺手删掉,目录不至于堆积;删失败也没关系,GC 会兜底
+        return null;
+    }
+    return $err;
+}
+
+function tc_turnstile_verify_url() {
+    $u = getenv('TC_TURNSTILE_VERIFY_URL');
+    return ($u !== false && $u !== '') ? $u : 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+}
+
+// 校验 Cloudflare Turnstile token。siteverify 走 tc_http_request(自动应用出站代理,8 秒超时)。
+// fail-closed:secret 未配置 / 网络失败 / 非 200 → 503「服务不可用」;
+// 200 但 success != true(含 token 缺失/已用/超时)→ 403「未通过」。
+function tc_turnstile_verify($settings, $token, $ip) {
+    $secret = isset($settings['captchaSecretKey']) ? trim((string) $settings['captchaSecretKey']) : '';
+    if ($secret === '') tc_fail(503, '人机验证未配置完成，请联系管理员');
+    $token = trim((string) $token);
+    if ($token === '') tc_fail(403, '请先完成人机验证');
+    $body = http_build_query(array('secret' => $secret, 'response' => $token, 'remoteip' => (string) $ip));
+    $res = tc_http_request(tc_turnstile_verify_url(), 'POST',
+        array('Content-Type' => 'application/x-www-form-urlencoded'),
+        $body, 8000, false);
+    if (!$res['ok'] || (int) $res['status'] !== 200) {
+        error_log('TinyChat: Turnstile siteverify 不可用(' . (isset($res['error']) ? $res['error'] : 'HTTP ' . (int) $res['status']) . ')，本次校验按失败处理');
+        tc_fail(503, '人机验证服务暂时不可用，请稍后再试');
+    }
+    $j = json_decode((string) (isset($res['body']) ? $res['body'] : ''), true);
+    if (!is_array($j) || empty($j['success'])) tc_fail(403, '人机验证未通过，请重新验证后再试');
+}
+
+// 统一人机验证闸门:$b 是已解析的请求体,$entry = login | register | reset | guest。
+// provider=none 或该入口开关关闭时直接放行;其余按 provider 分发,失败 tc_fail 退出。
+function tc_captcha_gate($db, $b, $entry) {
+    if (!is_array($db) || empty($db['settings']) || !is_array($db['settings'])) return;
+    $s = $db['settings'];
+    $provider = isset($s['captchaProvider']) ? (string) $s['captchaProvider'] : 'none';
+    if ($provider !== 'builtin' && $provider !== 'turnstile') return;
+    if (empty($s['captchaOn' . ucfirst((string) $entry)])) return;
+    $b = is_array($b) ? $b : array();
+    if ($provider === 'turnstile') {
+        tc_turnstile_verify($s, isset($b['turnstileToken']) ? $b['turnstileToken'] : '', tc_client_ip());
+        return;
+    }
+    $cap = isset($b['captcha']) && is_array($b['captcha']) ? $b['captcha'] : array();
+    $err = tc_captcha_verify(isset($cap['id']) ? $cap['id'] : '', isset($cap['answer']) ? $cap['answer'] : '');
+    if ($err !== null) tc_fail(403, $err);
+}
+
 // mbstring 属「建议安装」而非必需扩展(见 README 扩展表),但有几处直接调 mb_*:
 // 没装的主机上会直接 Fatal error。这里统一走带兜底的包装(缺扩展时按字节近似)。
 function tc_mb_len($s) {
@@ -3549,18 +3753,22 @@ function tc_mail_send($settings, $to, $subject, $html, $text = '', &$err = null)
     $write('QUIT', array(221,250)); fclose($fp); return true;
 }
 
-function tc_issue_token($user, $settings = null) {
+function tc_issue_token($user, $settings = null, $sid = '') {
     $s = is_array($settings) ? $settings : array();
     $days = isset($s['sessionDays']) ? max(1, (int) $s['sessionDays']) : 7;
     $epoch = isset($s['authEpoch']) ? max(1, (int) $s['authEpoch']) : 1;
-    return tc_jwt_sign(array(
+    $payload = array(
         'sub' => $user['id'],
         'name' => $user['name'],
         'admin' => !empty($user['admin']),
         'tv' => isset($user['tv']) ? (int) $user['tv'] : 0,
         'ep' => $epoch,
         'exp' => tc_now() + $days * 24 * 3600 * 1000,
-    ));
+    );
+    // 登录设备管理:令牌带上这次登录的设备 id,「退出该设备」时服务端据此作废这一条。
+    // 不带 sid 的令牌(旧版本签发、或非登录场景的令牌)照旧有效 —— 升级不把人踢下线。
+    if ($sid !== '') $payload['sid'] = (string) $sid;
+    return tc_jwt_sign($payload);
 }
 
 function tc_sanitize_user($u) {
@@ -3919,11 +4127,15 @@ function tc_auth_user($db) {
             $tv = isset($u['tv']) ? (int) $u['tv'] : 0;
             $ptv = isset($payload['tv']) ? (int) $payload['tv'] : 0;
             if ($ptv !== $tv) return null;
+            // 登录设备管理:该设备的会话已被「退出设备」移除时,令牌再合法也不认
+            if (function_exists('tc_device_session_ok') && !tc_device_session_ok($u, $payload)) return null;
             // 顺手补发笔记附件 Cookie:浏览器加载正文里的 <img>/<a> 带不了请求头,
             // 只能靠它认人(实现见 lib/api.php,只加载 core.php 的自检脚本没有它)
             if (function_exists('tc_note_attach_cookie_sync')) tc_note_attach_cookie_sync($db, $u);
             // 工具箱页面同理:它是在 iframe / 新标签页里被浏览器直接导航的,也没有请求头
             if (function_exists('tc_toolbox_cookie_sync')) tc_toolbox_cookie_sync($db, $u);
+            // 设备的「最近活跃」按 10 分钟节流刷新(只改内存对象,写请求会顺带落库)
+            if (function_exists('tc_device_touch')) tc_device_touch($u, $payload);
             return $u;
         }
     }
@@ -4043,9 +4255,10 @@ function tc_send_cors() {
     header('X-Content-Type-Options: nosniff');
     header('Referrer-Policy: strict-origin-when-cross-origin');
     // 页面含内联脚本/样式(主题色预置、各页面内嵌 JS),CSP 需保留 unsafe-inline;
-    // 站点资源全部本地化,外部来源仅放行聊天内容里的 https 图片
+    // 站点资源全部本地化,外部来源仅放行聊天内容里的 https 图片,
+    // 以及人机验证选 Cloudflare Turnstile 时要加载的 challenges.cloudflare.com(脚本+iframe)
     header('X-Frame-Options: DENY');
-    header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+    header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
     header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
 }
 

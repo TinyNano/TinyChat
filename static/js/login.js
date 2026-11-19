@@ -63,18 +63,27 @@ function setBusy(btn, busy, label) {
   btn.textContent = busy ? '请稍候…' : label;
 }
 
-async function submitAuth(api, name, password, btn, label, email, extra) {
+async function submitAuth(api, name, password, btn, label, email, extra, capEntry) {
   clearError();
+  const oc = window.OCUI || null;
+  const capNeeded = !!(oc && capEntry && oc.captchaEntryRequired && oc.captchaEntryRequired(capEntry));
+  const capBody = (oc && capEntry && oc.captchaPayload) ? (oc.captchaPayload(capEntry) || {}) : {};
+  if (capNeeded && !(oc && oc.captchaPayload && oc.captchaPayload(capEntry))) {
+    showError('请先完成人机验证');
+    return;
+  }
   setBusy(btn, true, label);
   try {
     const r = await fetch(apiUrl(api), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign(email ? { name, password, email } : { name, password }, typeof extra === 'object' && extra ? extra : {})),
+      body: JSON.stringify(Object.assign(email ? { name, password, email } : { name, password }, typeof extra === 'object' && extra ? extra : {}, capBody)),
     });
     const data = await r.json();
     if (!r.ok) {
       showError((data.error && data.error.message) || '请求失败');
+      // 失败后刷新挑战:验证码是一次性的(提交即消费),密码错了也要换新码重输
+      if (oc && capEntry && oc.captchaReset) oc.captchaReset(capEntry);
       return;
     }
     if (data.pendingVerification) {
@@ -120,6 +129,22 @@ function switchAuthForm(showId, hideId, focusId) {
   clearError();
   const focus = $(focusId);
   if (focus) setTimeout(() => focus.focus(), 40);
+  // 验证码挂载惰性化:切到注册/找回表单时才拉对应的挑战,登录页首载不预取
+  if (showId === 'register-form') mountCaptcha('register');
+  if (showId === 'forgot-form') mountCaptcha('reset');
+}
+
+// ---- 人机验证 ----
+// cfg 是 /api/config 下发的 captcha 块;登录表单默认可见,进入页面就挂;
+// 注册/找回表单切换到时才挂(见 switchAuthForm)。cfg 未取到时不挂,后端会兜住。
+let capCfg = null;
+const capMounted = { login: false, register: false, reset: false };
+function mountCaptcha(entry) {
+  if (capMounted[entry] || !capCfg) return;
+  capMounted[entry] = true;
+  if (window.OCUI && OCUI.captchaMount) {
+    OCUI.captchaMount(document.querySelector('[data-cap="' + entry + '"]'), capCfg, entry);
+  }
 }
 
 function bindPasswordToggles() {
@@ -165,6 +190,9 @@ if (!verifyToken && !resetToken && localStorage.getItem(cacheKey)) {
 }
 
 fetch(apiUrl('/api/config')).then((r) => r.json()).then((cfg) => {
+  // 人机验证:登录表单默认可见,先挂;注册/找回等切换时再挂(见 mountCaptcha)
+  capCfg = (cfg && cfg.captcha) || null;
+  mountCaptcha('login');
   // 站点默认主题:本地从未自选过主题包时应用管理员设置的默认主题(不落盘)
   try {
     const pack = String((cfg && cfg.defaultThemePack) || 'default');
@@ -289,11 +317,19 @@ if (forgotForm) forgotForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   // 发信慢的时候连点会重复发多封重置邮件:按钮要锁住,失败/成功都要解锁
   const btn = $('forgot-btn');
+  const oc = window.OCUI || null;
+  const capNeeded = !!(oc && oc.captchaEntryRequired && oc.captchaEntryRequired('reset'));
+  if (capNeeded && !(oc.captchaPayload && oc.captchaPayload('reset'))) return showError('请先完成人机验证');
   setBusy(btn, true, '发送中');
   try {
-    const r = await fetch(apiUrl('/api/auth/forgot-password'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: $('forgot-email').value.trim() }) });
+    const capBody = (oc && oc.captchaPayload) ? (oc.captchaPayload('reset') || {}) : {};
+    const r = await fetch(apiUrl('/api/auth/forgot-password'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ email: $('forgot-email').value.trim() }, capBody)) });
     const d = await r.json();
-    if (!r.ok) return showError((d.error && d.error.message) || '发送失败');
+    if (!r.ok) {
+      // 验证码一次性消费:失败后换新码,避免「上一张已作废」的连续失败
+      if (oc && oc.captchaReset) oc.captchaReset('reset');
+      return showError((d.error && d.error.message) || '发送失败');
+    }
     showError('如果邮箱存在，重置链接已发送。');
   } catch (er) {
     showError('发送失败，请检查网络后重试');
@@ -308,7 +344,7 @@ if (verifyToken) fetch(apiUrl('/api/auth/verify-email'), { method: 'POST', heade
 
 $('login-form').addEventListener('submit', (e) => {
   e.preventDefault();
-  submitAuth('/api/auth/login', $('login-name').value.trim(), $('login-password').value, $('login-btn'), '登录');
+  submitAuth('/api/auth/login', $('login-name').value.trim(), $('login-password').value, $('login-btn'), '登录', '', null, 'login');
 });
 
 if ($('setup-form')) {
@@ -323,7 +359,7 @@ $('register-form').addEventListener('submit', (e) => {
   submitAuth('/api/auth/register', $('reg-name').value.trim(), $('reg-password').value, $('register-btn'), '注册并登录', $('reg-email') ? $('reg-email').value.trim() : '', {
     agreementAccepted: !!($('reg-agree') && $('reg-agree').checked),
     invite: ($('reg-invite') && $('reg-invite').value.trim()) || '',
-  });
+  }, 'register');
 });
 
 $('show-register').addEventListener('click', (e) => {

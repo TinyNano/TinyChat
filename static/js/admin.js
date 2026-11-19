@@ -1941,6 +1941,10 @@ function fillChatLimits(s) {
   if ($('chat-save-api')) $('chat-save-api').checked = src.apiSaveChats !== false;
   if ($('chat-health-ok')) $('chat-health-ok').value = Math.min(100, Math.max(1, parseInt(src.healthOkMin, 10) || 75));
   if ($('chat-health-warn')) $('chat-health-warn').value = Math.min(99, Math.max(0, parseInt(src.healthWarnMin, 10) || 40));
+  // 搜索:服务端全文搜索开关 / 语义搜索(供应商 + 模型)
+  if ($('chat-search-enabled')) $('chat-search-enabled').checked = src.chatSearchEnabled !== false;
+  if ($('semantic-enabled')) $('semantic-enabled').checked = !!src.semanticEnabled;
+  if ($('semantic-model')) $('semantic-model').value = src.semanticModel || '';
   if ($('chat-img-archive')) $('chat-img-archive').checked = src.imageArchiveEnabled !== false;
   if ($('chat-img-archive-quota')) $('chat-img-archive-quota').value = Math.min(10240, Math.max(50, parseInt(src.imageArchiveQuotaMb, 10) || 500));
 }
@@ -1986,7 +1990,7 @@ function fillChatLimits(s) {
       const r = await api('/api/admin/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contextMessages: ctx, maxContextMessages: maxCtx, temperature, rateLimitPerMin: rateLimit, proxyTimeoutMs: timeoutSec * 1000, contextAutoLearn: contextLearn, persistChats, syncSettings, apiSaveChats, healthOkMin: healthOk, healthWarnMin: healthWarn, imageArchiveEnabled, imageArchiveQuotaMb, outboundProxy, allowPrivateUpstream }),
+        body: JSON.stringify({ contextMessages: ctx, maxContextMessages: maxCtx, temperature, rateLimitPerMin: rateLimit, proxyTimeoutMs: timeoutSec * 1000, contextAutoLearn: contextLearn, persistChats, syncSettings, apiSaveChats, healthOkMin: healthOk, healthWarnMin: healthWarn, imageArchiveEnabled, imageArchiveQuotaMb, outboundProxy, allowPrivateUpstream, chatSearchEnabled: !!($('chat-search-enabled') && $('chat-search-enabled').checked), semanticEnabled: !!($('semantic-enabled') && $('semantic-enabled').checked), semanticProviderId: ($('semantic-provider') && $('semantic-provider').value) || '', semanticModel: ($('semantic-model') && $('semantic-model').value.trim()) || '' }),
       });
       const data = await r.json();
       if (!r.ok) return toast((data.error && data.error.message) || '保存失败', true);
@@ -3479,6 +3483,31 @@ function mailTplBind() {
     finally { testBtn.disabled = false; testBtn.textContent = old; }
   });
 
+  // 人机验证方式切换:显隐 Turnstile 密钥输入行
+  const capProvider = $('captcha-provider');
+  if (capProvider) capProvider.addEventListener('change', captchaSyncProviderUI);
+
+  // 人机验证连通性自检:测的是已保存配置(与测试邮件同款,先保存再测)。
+  // 结果用 toast 简报,失败原因(不可达 / secret 无效 / 存储不可写)直接跟在后面,便于当场处理。
+  const capTestBtn = $('captcha-test-btn');
+  if (capTestBtn) capTestBtn.addEventListener('click', async () => {
+    capTestBtn.disabled = true;
+    const old = capTestBtn.textContent;
+    capTestBtn.textContent = '测试中…';
+    try {
+      const r = await api('/api/admin/settings/captcha-test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const d = await readJsonSafe(r);
+      const detail = (d.error && d.error.message) || '';
+      if (!r.ok) toast(detail || '连通性测试失败', true);
+      else toast(d.message || '连通性测试通过');
+    } catch (e) {
+      toast('测试失败，请检查网络：' + ((e && e.message) || ''), true);
+    } finally {
+      capTestBtn.disabled = false;
+      capTestBtn.textContent = old;
+    }
+  });
+
   // SMTP 密码:小眼睛切换明文/掩码。未勾选「保存后保持显示」时只显示掩码,点击取回明文会被拒绝
   const passToggle = $('smtp-pass-toggle');
   const passInput = $('smtp-pass');
@@ -3550,6 +3579,25 @@ async function loadVerifySettings() {
   set('default-theme-pack', s.defaultThemePack || 'default');
   set('login-max-fails', s.loginMaxFails != null ? s.loginMaxFails : 5);
   set('login-lock-sec', s.loginLockMs != null ? Math.round(s.loginLockMs / 1000) : 60);
+  // 人机验证:方式 / 密钥(secret 为掩码回显,提交时服务端按 •• 跳过)/ 四个入口开关
+  set('captcha-provider', s.captchaProvider || 'none');
+  set('captcha-site-key', s.captchaSiteKey || '');
+  set('captcha-secret-key', s.captchaSecretKey || '');
+  if ($('captcha-on-login')) $('captcha-on-login').checked = s.captchaOnLogin !== false;
+  if ($('captcha-on-register')) $('captcha-on-register').checked = s.captchaOnRegister !== false;
+  if ($('captcha-on-reset')) $('captcha-on-reset').checked = s.captchaOnReset !== false;
+  if ($('captcha-on-guest')) $('captcha-on-guest').checked = s.captchaOnGuest !== false;
+  captchaSyncProviderUI();
+  // 语义搜索的下拉要用供应商列表:这里没有现成的缓存,就地拉一次(几十毫秒,只在切换页签时发生)
+  if (!$('semantic-provider') || !$('semantic-provider').dataset.filled) {
+    api('/api/providers').then((r) => r.json()).then((dp) => {
+      window.ADMIN_PROVIDERS = Array.isArray(dp.providers) ? dp.providers : [];
+      fillSemanticProviders(s.semanticProviderId || '');
+      if ($('semantic-provider')) $('semantic-provider').dataset.filled = '1';
+    }).catch(() => {});
+  } else {
+    fillSemanticProviders(s.semanticProviderId || '');
+  }
   const tpl = s.mailTemplates || {};
   MAIL_TPL.siteName = s.siteName || 'TinyChat';
   MAIL_TPL.tpl.verify = { subject: tpl.verifySubject || '', html: tpl.verifyHtml || '' };
@@ -3558,6 +3606,28 @@ async function loadVerifySettings() {
   mailTplBind();
   mailTplSyncInputs();
   loadInvites();
+}
+// 人机验证方式切换:只有选 Turnstile 才显示 siteKey/secretKey 输入与连通性提示
+// 语义搜索的供应商下拉:列出全部渠道(含已停用的,避免选中项被清空),标注 API 格式。
+// 只要求「该渠道能提供 /embeddings」—— 同一个 OpenAI 兼容渠道下换模型名即可,
+// 不需要在供应商里单独登记 embeddings 模型。
+function fillSemanticProviders(selected) {
+  const sel = $('semantic-provider');
+  if (!sel) return;
+  const list = (window.ADMIN_PROVIDERS || []);
+  sel.innerHTML = '<option value="">（未指定）</option>' + list.map((p) => {
+    const label = (p.name || p.id) + ' · ' + (p.apiFormat || 'chat');
+    return '<option value="' + String(p.id).replace(/"/g, '&quot;') + '">' + label.replace(/</g, '&lt;') + '</option>';
+  }).join('');
+  sel.value = selected || '';
+}
+
+function captchaSyncProviderUI() {
+  const mode = ($('captcha-provider') && $('captcha-provider').value) || 'none';
+  const turnstile = mode === 'turnstile';
+  if ($('captcha-sitekey-row')) $('captcha-sitekey-row').classList.toggle('hidden', !turnstile);
+  if ($('captcha-secretkey-row')) $('captcha-secretkey-row').classList.toggle('hidden', !turnstile);
+  if ($('captcha-turnstile-note')) $('captcha-turnstile-note').classList.toggle('hidden', !turnstile);
 }
 async function loadInvites() {
   try {
@@ -3959,7 +4029,7 @@ async function loadPackages() {
     if (!VERIFY_LOADED) { toast('验证设置尚未加载完成，已取消保存', true); return; }
     const old=save.textContent; save.disabled=true; save.textContent='保存中…';
     try {
-    const tplPayload=MAIL_TPL.loaded?{mailTemplates:{tplVersion:2,verifySubject:MAIL_TPL.tpl.verify.subject,verifyHtml:MAIL_TPL.tpl.verify.html,resetSubject:MAIL_TPL.tpl.reset.subject,resetHtml:MAIL_TPL.tpl.reset.html}}:{}; const payload=Object.assign({emailVerificationEnabled:!!$('verify-email-enabled').checked,passwordResetEnabled:!!$('verify-reset-enabled').checked,freeQuotaUnlimited:!!$('verify-quota-unlimited').checked,freeQuota:parseInt($('verify-free-quota').value,10)||0,sessionDays:Math.min(30,Math.max(1,parseInt($('session-days')&&$('session-days').value,10)||7)),apiKeysEnabled:!!($('apikeys-enabled')&&$('apikeys-enabled').checked),registerInviteRequired:!!($('invite-required')&&$('invite-required').checked),guestEnabled:!!($('guest-enabled')&&$('guest-enabled').checked),guestRounds:Math.min(1000,Math.max(1,parseInt($('guest-rounds')&&$('guest-rounds').value,10)||3)),allowRegister:!!($('register-open')&&$('register-open').checked),registerLimitPerHour:Math.min(1000,Math.max(1,parseInt($('register-limit')&&$('register-limit').value,10)||5)),allowUserProviders:!!($('user-providers-allowed')&&$('user-providers-allowed').checked),accountDeletionMode:($('account-deletion-mode')&&$('account-deletion-mode').value)||'soft',memoryEnabled:!!($('memory-enabled')&&$('memory-enabled').checked),totpEnabled:!!($('totp-enabled')&&$('totp-enabled').checked),loginAlertEnabled:!!($('login-alert-enabled')&&$('login-alert-enabled').checked),quotaWarnBelow:Math.min(100000,Math.max(0,parseInt($('quota-warn-below')&&$('quota-warn-below').value,10)||0)),defaultThemePack:($('default-theme-pack')&&$('default-theme-pack').value)||'default',loginMaxFails:Math.min(50,Math.max(0,parseInt($('login-max-fails')&&$('login-max-fails').value,10)||0)),loginLockMs:Math.min(3600000,Math.max(0,parseInt($('login-lock-sec')&&$('login-lock-sec').value,10)||0))*1000,smtpKeyRevealable:!!($('smtp-pass-keep')&&$('smtp-pass-keep').checked),smtp:{host:$('smtp-host').value.trim(),port:parseInt($('smtp-port').value,10)||587,username:$('smtp-user').value.trim(),password:$('smtp-pass').value,encryption:$('smtp-encryption').value,fromName:$('smtp-from-name').value.trim(),fromEmail:$('smtp-from-email').value.trim()}},tplPayload); const r=await api('/api/admin/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const d=await r.json(); if(!r.ok)return toast((d.error&&d.error.message)||'保存失败',true); toast('验证设置已保存'); } catch(e) { toast('保存失败：' + ((e && e.message) || '网络错误'), true); } finally { save.disabled=false; save.textContent=old; } });
+    const tplPayload=MAIL_TPL.loaded?{mailTemplates:{tplVersion:2,verifySubject:MAIL_TPL.tpl.verify.subject,verifyHtml:MAIL_TPL.tpl.verify.html,resetSubject:MAIL_TPL.tpl.reset.subject,resetHtml:MAIL_TPL.tpl.reset.html}}:{}; const payload=Object.assign({emailVerificationEnabled:!!$('verify-email-enabled').checked,passwordResetEnabled:!!$('verify-reset-enabled').checked,freeQuotaUnlimited:!!$('verify-quota-unlimited').checked,freeQuota:parseInt($('verify-free-quota').value,10)||0,sessionDays:Math.min(30,Math.max(1,parseInt($('session-days')&&$('session-days').value,10)||7)),apiKeysEnabled:!!($('apikeys-enabled')&&$('apikeys-enabled').checked),registerInviteRequired:!!($('invite-required')&&$('invite-required').checked),guestEnabled:!!($('guest-enabled')&&$('guest-enabled').checked),guestRounds:Math.min(1000,Math.max(1,parseInt($('guest-rounds')&&$('guest-rounds').value,10)||3)),allowRegister:!!($('register-open')&&$('register-open').checked),registerLimitPerHour:Math.min(1000,Math.max(1,parseInt($('register-limit')&&$('register-limit').value,10)||5)),allowUserProviders:!!($('user-providers-allowed')&&$('user-providers-allowed').checked),accountDeletionMode:($('account-deletion-mode')&&$('account-deletion-mode').value)||'soft',memoryEnabled:!!($('memory-enabled')&&$('memory-enabled').checked),totpEnabled:!!($('totp-enabled')&&$('totp-enabled').checked),loginAlertEnabled:!!($('login-alert-enabled')&&$('login-alert-enabled').checked),quotaWarnBelow:Math.min(100000,Math.max(0,parseInt($('quota-warn-below')&&$('quota-warn-below').value,10)||0)),defaultThemePack:($('default-theme-pack')&&$('default-theme-pack').value)||'default',captchaProvider:($('captcha-provider')&&$('captcha-provider').value)||'none',captchaSiteKey:($('captcha-site-key')&&$('captcha-site-key').value.trim())||'',captchaSecretKey:($('captcha-secret-key')&&$('captcha-secret-key').value)||'',captchaOnLogin:!!($('captcha-on-login')&&$('captcha-on-login').checked),captchaOnRegister:!!($('captcha-on-register')&&$('captcha-on-register').checked),captchaOnReset:!!($('captcha-on-reset')&&$('captcha-on-reset').checked),captchaOnGuest:!!($('captcha-on-guest')&&$('captcha-on-guest').checked),loginMaxFails:Math.min(50,Math.max(0,parseInt($('login-max-fails')&&$('login-max-fails').value,10)||0)),loginLockMs:Math.min(3600000,Math.max(0,parseInt($('login-lock-sec')&&$('login-lock-sec').value,10)||0))*1000,smtpKeyRevealable:!!($('smtp-pass-keep')&&$('smtp-pass-keep').checked),smtp:{host:$('smtp-host').value.trim(),port:parseInt($('smtp-port').value,10)||587,username:$('smtp-user').value.trim(),password:$('smtp-pass').value,encryption:$('smtp-encryption').value,fromName:$('smtp-from-name').value.trim(),fromEmail:$('smtp-from-email').value.trim()}},tplPayload); const r=await api('/api/admin/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const d=await r.json(); if(!r.ok)return toast((d.error&&d.error.message)||'保存失败',true); toast('验证设置已保存'); } catch(e) { toast('保存失败：' + ((e && e.message) || '网络错误'), true); } finally { save.disabled=false; save.textContent=old; } });
   const invalidate=$('session-invalidate'); if(invalidate) invalidate.addEventListener('click',async()=>{
     const ok=window.OCUI&&OCUI.confirm?await OCUI.confirm({title:'强制全站下线',message:'所有人的现有登录态会立即失效（包括你自己），需要重新登录。确认执行？',danger:true,confirmText:'执行'}):confirm('所有人的现有登录态会立即失效（包括你自己），确认执行？');
     if(!ok) return;

@@ -1442,8 +1442,39 @@ function tc_api_history_messages($body, $format) {
         foreach ($body['messages'] as $m) {
             if (!is_array($m)) continue;
             $role = isset($m['role']) ? $m['role'] : '';
+            if ($role === 'tool') {
+                // 工具结果按 role:'tool' 留档(带 tool_call_id):Agent 的多轮里 tool 消息是
+                // 历史的一部分,压成 user 文本会让回放出来的会话与真实请求对不上。
+                // 工具结果常是 JSON 数组/对象:按紧凑 JSON 留档。不能用 tc_content_text 拍平
+                // (那是给 [{type,text}] 部件用的,会把 JSON 内容读成空串)
+                $c = isset($m['content']) ? $m['content'] : '';
+                if (is_array($c)) $c = tc_json_encode($c);
+                $c = trim((string) $c);
+                if ($c === '') continue;
+                $row = array('role' => 'tool', 'content' => substr($c, 0, 200000));
+                if (isset($m['tool_call_id']) && is_string($m['tool_call_id']) && $m['tool_call_id'] !== '') $row['tool_call_id'] = $m['tool_call_id'];
+                $out[] = $row;
+                continue;
+            }
             if ($role !== 'user' && $role !== 'assistant') continue;   // 跳过 system
             $push($role, isset($m['content']) ? $m['content'] : '');
+            // assistant.tool_calls 挂在刚推入的那条上(参数按原文保留,不做格式化)
+            if ($role === 'assistant' && !empty($m['tool_calls']) && is_array($m['tool_calls']) && $out) {
+                $calls = array();
+                foreach (array_slice($m['tool_calls'], 0, 32) as $tc) {
+                    if (!is_array($tc) || !isset($tc['id'])) continue;
+                    $fn = isset($tc['function']) && is_array($tc['function']) ? $tc['function'] : array();
+                    $calls[] = array(
+                        'id' => (string) $tc['id'],
+                        'type' => 'function',
+                        'function' => array(
+                            'name' => (string) (isset($fn['name']) ? $fn['name'] : ''),
+                            'arguments' => (string) (isset($fn['arguments']) ? $fn['arguments'] : ''),
+                        ),
+                    );
+                }
+                if ($calls) $out[count($out) - 1]['toolCalls'] = $calls;
+            }
         }
     }
     return $out;

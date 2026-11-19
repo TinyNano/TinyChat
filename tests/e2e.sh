@@ -45,6 +45,7 @@ cleanup() {
   kill_tree "$APP_PID"
   kill_tree "$MOCK_PID"
   kill_tree "$OAUTH_PID"
+  kill_tree "$TURNSTILE_PID"
   kill_tree "$SMTP_PID"
   kill_tree "$SMTP_GBK_PID"
   kill_tree "$SMTP_REQ_PID"
@@ -68,6 +69,7 @@ SMTP_REQ_PID=$!
 php tests/mock-smtp.php "$SMTP_GMAIL_PORT" gmail535 >"$TMP/smtp-gmail.log" 2>&1 &
 SMTP_GMAIL_PID=$!
 OAUTH_PORT="${E2E_OAUTH_PORT:-8104}"
+TURNSTILE_PORT="${E2E_TURNSTILE_PORT:-8109}"
 DATA_DIR="$TMP/data" ADMIN_NAME=admin ADMIN_PASSWORD=e2e-pass \
   TC_BRAVE_SEARCH_BASE="http://127.0.0.1:$MOCK_PORT" \
   TC_DDG_HTML_BASE="http://127.0.0.1:$MOCK_PORT" \
@@ -79,6 +81,7 @@ DATA_DIR="$TMP/data" ADMIN_NAME=admin ADMIN_PASSWORD=e2e-pass \
   TC_QQ_OAUTH_BASE="http://127.0.0.1:$OAUTH_PORT" \
   TC_LINUXDO_OAUTH_BASE="http://127.0.0.1:$OAUTH_PORT" \
   TC_NODELOC_OAUTH_BASE="http://127.0.0.1:$OAUTH_PORT" \
+  TC_TURNSTILE_VERIFY_URL="http://127.0.0.1:$TURNSTILE_PORT/turnstile/siteverify" \
   TC_ALLOW_PRIVATE_UPSTREAM=1 \
   TC_WEB_CN_ONLY=0 \
   php -S "127.0.0.1:$PORT" router.php >"$TMP/app.log" 2>&1 &
@@ -88,6 +91,8 @@ MOCK_PID=$!
 OAUTH_PORT="${E2E_OAUTH_PORT:-8104}"
 php -S "127.0.0.1:$OAUTH_PORT" tests/mock-oauth.php >"$TMP/mock-oauth.log" 2>&1 &
 OAUTH_PID=$!
+php -S "127.0.0.1:$TURNSTILE_PORT" tests/mock-turnstile.php >"$TMP/mock-turnstile.log" 2>&1 &
+TURNSTILE_PID=$!
 
 wait_for() {
   local i code
@@ -826,6 +831,79 @@ assert_contains "一键清除游客" "$purge" '"ok":true'
 assert_contains "清除后有移除计数" "$purge" '"removed":'
 LEFT=$(curl -s "$BASE/api/admin/users" -H "$AUTH" | grep -o '"guest":true' | wc -l | tr -d ' ')
 assert_eq "清除后无游客" "$LEFT" "0"
+
+# ---------- 人机验证:内置图形验证码 ----------
+say "== 人机验证:内置 =="
+# 关掉注册邀请码,后续注册用例直接裸注册
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"registerInviteRequired":false}' > /dev/null
+assert_contains "config 默认 captcha provider=none" "$(curl -s "$BASE/api/config")" '"captcha":{"provider":"none"'
+# 连通性自检:未启用时明确拒绝(而不是含糊其辞)
+assert_contains "自检拒绝未启用" "$(curl -s -X POST "$BASE/api/admin/settings/captcha-test" -H "$AUTH" -H "Content-Type: application/json" -d '{}')" '未启用人机验证'
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"captchaProvider":"builtin"}' > /dev/null
+E2ECFG=$(curl -s "$BASE/api/config")
+assert_contains "config 下发 builtin" "$E2ECFG" '"provider":"builtin"'
+if printf '%s' "$E2ECFG" | grep -qF 'captchaSecretKey'; then bad "config 不应下发 captchaSecretKey"; else ok "config 不含 captchaSecretKey"; fi
+assert_contains "登录无验证码被拒" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d '{"name":"admin","password":"e2e-pass"}')" '请先完成人机验证'
+assert_contains "注册无验证码被拒" "$(curl -s -X POST "$BASE/api/auth/register" -H "Content-Type: application/json" -d '{"name":"capuser","password":"pass1234"}')" '请先完成人机验证'
+assert_contains "游客无验证码被拒" "$(curl -s -X POST "$BASE/api/auth/guest")" '请先完成人机验证'
+assert_contains "找回密码无验证码被拒" "$(curl -s -X POST "$BASE/api/auth/forgot-password" -H "Content-Type: application/json" -d '{"email":"member@e2e.local"}')" '请先完成人机验证'
+# 取一张码:答案只存在服务端 data/captcha/{id}.json,前端只拿到 SVG
+cap_json=$(curl -s "$BASE/api/captcha/new")
+CAPID=$(printf '%s' "$cap_json" | jget id)
+[ -n "$CAPID" ] && ok "内置验证码可获取" || bad "内置验证码可获取"
+assert_contains "验证码返回 SVG 图" "$cap_json" '<svg'
+cap_answer=$(tr -d '\n' < "$TMP/data/captcha/$CAPID.json" | sed -n 's/.*"answer":"\([A-Z0-9]*\)".*/\1/p')
+[ -n "$cap_answer" ] && ok "服务端挑战文件可读" || bad "服务端挑战文件可读"
+assert_contains "错答案被拒" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d "{\"name\":\"admin\",\"password\":\"e2e-pass\",\"captcha\":{\"id\":\"$CAPID\",\"answer\":\"ZZZZ\"}}")" '验证码不正确'
+assert_contains "对答案放行登录" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d "{\"name\":\"admin\",\"password\":\"e2e-pass\",\"captcha\":{\"id\":\"$CAPID\",\"answer\":\"$cap_answer\"}}")" '"token":"'
+# 一次性消费:同一张码答对过一次后再用(哪怕答案正确)也必须拒绝
+assert_contains "验证码一次性消费" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d "{\"name\":\"admin\",\"password\":\"e2e-pass\",\"captcha\":{\"id\":\"$CAPID\",\"answer\":\"$cap_answer\"}}")" '已失效'
+# 连错 3 次后作废:第 4 次直接提示刷新
+CAP2JSON=$(curl -s "$BASE/api/captcha/new")
+CAP2=$(printf '%s' "$CAP2JSON" | jget id)
+curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d "{\"name\":\"admin\",\"password\":\"e2e-pass\",\"captcha\":{\"id\":\"$CAP2\",\"answer\":\"ZZZZ\"}}" > /dev/null
+curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d "{\"name\":\"admin\",\"password\":\"e2e-pass\",\"captcha\":{\"id\":\"$CAP2\",\"answer\":\"YYYY\"}}" > /dev/null
+curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d "{\"name\":\"admin\",\"password\":\"e2e-pass\",\"captcha\":{\"id\":\"$CAP2\",\"answer\":\"XXXX\"}}" > /dev/null
+assert_contains "连错 3 次后验证码作废" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d "{\"name\":\"admin\",\"password\":\"e2e-pass\",\"captcha\":{\"id\":\"$CAP2\",\"answer\":\"WWWW\"}}")" '次数过多'
+# 入口开关:只关登录入口后登录放行(注册入口仍拦)
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"captchaOnLogin":false}' > /dev/null
+assert_contains "关掉登录入口后登录放行" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d '{"name":"admin","password":"e2e-pass"}')" '"token":"'
+assert_contains "注册入口仍拦截" "$(curl -s -X POST "$BASE/api/auth/register" -H "Content-Type: application/json" -d '{"name":"capuser","password":"pass1234"}')" '请先完成人机验证'
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"captchaOnLogin":true}' > /dev/null
+# 对答案注册放行(注册入口的完整链路)
+CAP3JSON=$(curl -s "$BASE/api/captcha/new")
+CAP3=$(printf '%s' "$CAP3JSON" | jget id)
+CAP3ANS=$(tr -d '\n' < "$TMP/data/captcha/$CAP3.json" | sed -n 's/.*"answer":"\([A-Z0-9]*\)".*/\1/p')
+assert_contains "对答案注册成功" "$(curl -s -X POST "$BASE/api/auth/register" -H "Content-Type: application/json" -d "{\"name\":\"capuser\",\"password\":\"pass1234\",\"agreementAccepted\":true,\"captcha\":{\"id\":\"$CAP3\",\"answer\":\"$CAP3ANS\"}}")" '"token":"'
+# 连通性自检(builtin):服务端自跑一次生成→校验闭环,证明 data/ 存储可用
+assert_contains "内置自检通过" "$(curl -s -X POST "$BASE/api/admin/settings/captcha-test" -H "$AUTH" -H "Content-Type: application/json" -d '{}')" '自检通过'
+
+# ---------- 人机验证:Turnstile(fail-closed) ----------
+say "== 人机验证:Turnstile =="
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"captchaProvider":"turnstile","captchaSiteKey":"0x4AAAsiteKey","captchaSecretKey":"e2e-secret"}' > /dev/null
+assert_contains "config 下发 turnstile siteKey" "$(curl -s "$BASE/api/config")" '"siteKey":"0x4AAAsiteKey"'
+ADMSET=$(curl -s "$BASE/api/admin/settings" -H "$AUTH")
+if printf '%s' "$ADMSET" | grep -qF '"captchaSecretKey":"e2e-secret"'; then bad "secret 不应明文回显"; else ok "secret 掩码回显"; fi
+assert_contains "Turnstile 无 token 被拒" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d '{"name":"admin","password":"e2e-pass"}')" '请先完成人机验证'
+assert_contains "Turnstile 坏 token 403" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d '{"name":"admin","password":"e2e-pass","turnstileToken":"bad-xyz"}')" '人机验证未通过'
+assert_contains "Turnstile 好 token 放行" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d '{"name":"admin","password":"e2e-pass","turnstileToken":"good-abc"}')" '"token":"'
+assert_contains "Turnstile 上游不可用 503(fail-closed)" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d '{"name":"admin","password":"e2e-pass","turnstileToken":"down-abc"}')" '暂时不可用'
+# 连通性自检(turnstile):可达 + secret 有效 → 明确的「连通正常」
+assert_contains "Turnstile 连通性自检通过" "$(curl -s -X POST "$BASE/api/admin/settings/captcha-test" -H "$AUTH" -H "Content-Type: application/json" -d '{}')" '连通正常'
+# secret 填错:自检必须点名「Secret Key 无效」,而不是笼统失败(否则管理员查不出原因)
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"captchaSecretKey":"e2e-wrong-secret"}' > /dev/null
+assert_contains "Turnstile secret 错误被识别" "$(curl -s -X POST "$BASE/api/admin/settings/captcha-test" -H "$AUTH" -H "Content-Type: application/json" -d '{}')" 'Secret Key 无效'
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"captchaSecretKey":"e2e-secret"}' > /dev/null
+# 掩码提交不覆盖已存 secret:mock 校验 secret 必须等于 e2e-secret,若被掩码覆盖,good token 也会失败。
+# 掩码占位符(••)必须经 printf 落盘再 --data-binary @file 发送:Git Bash 的 curl 在内联
+# 拼接里会把 UTF-8 的 • 字节搅成 ?(见本文件「获取模型」一节的同款处理),内联发掩码会真把 secret 覆盖掉。
+MASKEDCAP=$'\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2'
+printf '{"captchaProvider":"turnstile","captchaSecretKey":"%s"}' "$MASKEDCAP" > "$TMP/masked-cap.json"
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" --data-binary @"$TMP/masked-cap.json" > /dev/null
+assert_contains "掩码提交不覆盖 secret" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d '{"name":"admin","password":"e2e-pass","turnstileToken":"good-after-mask"}')" '"token":"'
+# 还原:关闭人机验证、恢复注册邀请码,后续用例不受影响
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"captchaProvider":"none","registerInviteRequired":true}' > /dev/null
+assert_contains "关闭后登录恢复" "$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -d '{"name":"admin","password":"e2e-pass"}')" '"token":"'
 
 # ---------- 性能优化开关 ----------
 say "== 性能优化开关 =="
@@ -2221,6 +2299,152 @@ im_msg_body a4 "{\"thread\":\"$STID\",\"text\":\"@AI 用不存在的供应商\",
 assert_contains "无效供应商回错误提示而非 500" "$(curl -s -X POST "$BASE/api/im/messages" -H "$SUAUTH" -H "Content-Type: application/json" \
   --data-binary @"$TMP/im-a4.json")" '"error"'
 
+
+# ---------- 代码块实时预览 / Function calling 透传 / 会话搜索 / 设备管理 / 语义搜索 ----------
+# v2.2.0 这一批功能里「接线零散、坏了也不报错」的部分:工具调用被同步白名单丢掉、
+# 设备被踢却仍能继续用、FTS 索引与库不同步、embeddings 配置打开却没生效 —— 都只能真跑接口。
+say "== 工具调用透传(开放接口) =="
+# 1) tool_calls 请求体与上游回复原样透传:客户端发 tools + tool 结果,上游回 tool_calls,
+#    本站不能改写/丢弃任何字段(第三方 Agent 框架依赖这个形状)
+cat > "$TMP/tools-req.json" <<EOF
+{"model":"mock-tool-call","providerId":"$PROV","stream":false,
+ "tools":[{"type":"function","function":{"name":"get_weather","description":"查天气","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],
+ "messages":[
+   {"role":"user","content":"北京今天天气?"},
+   {"role":"assistant","content":null,"tool_calls":[{"id":"call_a1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}}]},
+   {"role":"tool","tool_call_id":"call_a1","content":"{\"temp\":21,\"text\":\"小雨\"}"}
+ ]}
+EOF
+tools_out=$(curl -s -X POST "$BASE/v1/chat/completions" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d @"$TMP/tools-req.json")
+assert_contains "开放接口透传上游 tool_calls" "$tools_out" '"tool_calls"'
+assert_contains "tool_calls 带 function.name" "$tools_out" '"get_weather"'
+assert_contains "tool_calls 带 id" "$tools_out" '"call_mock_1"'
+assert_contains "tool_calls 参数原样透传" "$tools_out" '北京'
+# 2) 流式:tool_calls 分片逐段透传,不能因为「不是正文」被丢掉
+cat > "$TMP/tools-stream.json" <<EOF
+{"model":"mock-tool-stream","providerId":"$PROV","stream":true,
+ "tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}],
+ "messages":[{"role":"user","content":"北京今天天气?"}]}
+EOF
+tools_stream=$(curl -s -N -X POST "$BASE/v1/chat/completions" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d @"$TMP/tools-stream.json")
+assert_contains "流式透传 tool_calls 首帧" "$tools_stream" '"tool_calls"'
+assert_contains "流式透传调用 id" "$tools_stream" 'call_mock_s1'
+assert_contains "流式透传 finish_reason=tool_calls" "$tools_stream" '"finish_reason":"tool_calls"'
+assert_contains "流式以 [DONE] 收尾" "$tools_stream" '[DONE]'
+
+say "== 同步白名单保留工具调用 =="
+cat > "$TMP/chat-tools-sync.json" <<EOF
+{"baseRevision":$(curl -s "$BASE/api/sync/chats" -H "$UAUTH" | jget revision),
+ "chats":[{"id":"ct1","title":"工具调用自检","createdAt":1795000000000,"updatedAt":1795000000000,"messages":[
+   {"role":"user","content":"北京今天天气?"},
+   {"role":"assistant","content":null,"finishReason":"tool_calls","toolCalls":[{"id":"call_sync_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}}]},
+   {"role":"tool","tool_call_id":"call_sync_1","name":"get_weather","content":"{\"temp\":21}"}
+ ]}]}
+EOF
+assert_contains "含工具调用的会话可保存" "$(curl -s -X POST "$BASE/api/sync/chats" -H "$UAUTH" -H "Content-Type: application/json" -d @"$TMP/chat-tools-sync.json")" '"ok":true'
+synced=$(curl -s "$BASE/api/sync/chats" -H "$UAUTH")
+assert_contains "回读保留 assistant.toolCalls" "$synced" '"toolCalls":\s*\[{"id":"call_sync_1"'
+assert_contains "回读保留 role=tool" "$synced" '"role":"tool"'
+assert_contains "回读保留 tool_call_id" "$synced" '"tool_call_id":"call_sync_1"'
+
+say "== 会话搜索(FTS5) =="
+sr=$(curl -s "$BASE/api/chats/search?q=%E5%B7%A5%E5%85%B7%E8%B0%83%E7%94%A8" -H "$UAUTH")
+assert_contains "搜索命中标题并带片段" "$sr" '"id":"ct1"'
+assert_contains "搜索返回片段标记" "$(curl -s "$BASE/api/chats/search?q=get_weather" -H "$UAUTH")" '<mark>'
+assert_contains "首搜自动建索引" "$sr" '"indexed":true'
+none_hits=$(curl -s "$BASE/api/chats/search?q=%E5%B7%A5%E5%85%B7%E8%B0%83%E7%94%A8" -H "$AUTH")
+if printf '%s' "$none_hits" | grep -q '"id":"ct1"'; then bad "管理员的搜索串到了别人的会话"; else ok "搜索只返回自己的会话(管理员的搜不到)"; fi
+# 短查询(2 字)走 LIKE 兜底,不能因为 trigram 的 3 字符下限而一无所获
+assert_contains "2 字查询可检索" "$(curl -s "$BASE/api/chats/search?q=%E5%B7%A5%E5%85%B7" -H "$UAUTH")" '"id":"ct1"'
+# 图片 base64 不进索引:搜一长串 A 不应命中(索引里的图片被剔除)
+img_hits=$(curl -s "$BASE/api/chats/search?q=AAAAAAAAAAAAAAAAAAAAAAAA" -H "$UAUTH")
+if printf '%s' "$img_hits" | grep -q '"id":"'; then bad "图片 base64 进了索引"; else ok "图片 base64 不进索引"; fi
+# 会话更新后索引跟着变:改标题再搜新标题能命中
+cat > "$TMP/chat-tools-sync2.json" <<EOF
+{"baseRevision":$(curl -s "$BASE/api/sync/chats" -H "$UAUTH" | jget revision),
+ "chats":[{"id":"ct1","title":"改过的标题甲乙丙","createdAt":1795000000000,"updatedAt":1795000099999,"messages":[
+   {"role":"user","content":"北京今天天气?"},
+   {"role":"assistant","content":null,"finishReason":"tool_calls","toolCalls":[{"id":"call_sync_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}}]},
+   {"role":"tool","tool_call_id":"call_sync_1","name":"get_weather","content":"{\"temp\":21}"}
+ ]}]}
+EOF
+curl -s -X POST "$BASE/api/sync/chats" -H "$UAUTH" -H "Content-Type: application/json" -d @"$TMP/chat-tools-sync2.json" > /dev/null
+assert_contains "改标题后新标题可搜到" "$(curl -s "$BASE/api/chats/search?q=%E7%94%B2%E4%B9%99%E4%B8%99" -H "$UAUTH")" '"id":"ct1"'
+assert_contains "手动重建索引" "$(curl -s -X DELETE "$BASE/api/chats/search/index" -H "$UAUTH")" '"ok":true'
+# 未登录不能搜(会话正文是私人内容)
+assert_eq "未登录搜索 401" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/chats/search?q=x")" "401"
+# 后台关闭后服务端搜索整体退出(enabled=false),前端据此退回本地过滤
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"chatSearchEnabled":false}' > /dev/null
+assert_contains "后台关闭后搜索回退" "$(curl -s "$BASE/api/chats/search?q=%E5%B7%A5%E5%85%B7" -H "$UAUTH")" '"enabled":false'
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"chatSearchEnabled":true}' > /dev/null
+
+say "== 登录设备管理 =="
+DEV1=$(curl -s "$BASE/api/auth/login" -H "Content-Type: application/json" -H "User-Agent: E2EDeviceOne/1.0" -d '{"name":"tester1","password":"pass1234"}' | jget token)
+DEV2=$(curl -s "$BASE/api/auth/login" -H "Content-Type: application/json" -H "User-Agent: E2EDeviceTwo/2.0" -d '{"name":"tester1","password":"pass1234"}' | jget token)
+[ -n "$DEV1" ] && [ -n "$DEV2" ] && ok "两个设备分别登录" || bad "两个设备分别登录"
+dlist=$(curl -s "$BASE/api/me/devices" -H "Authorization: Bearer $DEV1")
+assert_contains "设备列表含两台设备" "$dlist" 'E2EDeviceTwo/2.0'
+assert_contains "设备列表标出当前设备" "$dlist" '"current":true'
+# 踢掉第二台:它的令牌立即失效,第一台不受影响
+SID2=$(printf '%s' "$dlist" | tr '}' '\n' | grep 'E2EDeviceTwo' | sed -n 's/.*"id":"\([a-z0-9]*\)".*/\1/p')
+[ -n "$SID2" ] && ok "取到第二台设备的 id" || bad "取到第二台设备的 id"
+assert_contains "退出该设备成功" "$(curl -s -X DELETE "$BASE/api/me/devices/$SID2" -H "Authorization: Bearer $DEV1")" '"ok":true'
+assert_eq "被踢设备令牌失效(401)" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/me" -H "Authorization: Bearer $DEV2")" "401"
+assert_eq "本机令牌仍然有效(200)" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/me" -H "Authorization: Bearer $DEV1")" "200"
+# 再登录一台,然后「退出其它全部设备」:当前一台保留、其它全部失效
+DEV3=$(curl -s "$BASE/api/auth/login" -H "Content-Type: application/json" -H "User-Agent: E2EDeviceThree/3.0" -d '{"name":"tester1","password":"pass1234"}' | jget token)
+assert_contains "退出其它全部设备" "$(curl -s -X DELETE "$BASE/api/me/devices" -H "Authorization: Bearer $DEV3")" '"ok":true'
+assert_eq "当前设备保留" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/me" -H "Authorization: Bearer $DEV3")" "200"
+assert_eq "其它设备全部失效" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/me" -H "Authorization: Bearer $DEV1")" "401"
+assert_contains "退出不存在的设备回 404" "$(curl -s -X DELETE "$BASE/api/me/devices/ffffffffffffffff" -H "Authorization: Bearer $DEV3")" '已下线'
+# 改密码只踢其它设备、保留本机(旧行为是把本机也踢下线,用户改完密码还得重新登录)
+DEV4=$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -H "User-Agent: E2EPwdA/1.0" -d '{"name":"tester1","password":"pass1234"}' | jget token)
+DEV5=$(curl -s -X POST "$BASE/api/auth/login" -H "Content-Type: application/json" -H "User-Agent: E2EPwdB/1.0" -d '{"name":"tester1","password":"pass1234"}' | jget token)
+NEWT=$(curl -s -X POST "$BASE/api/auth/password" -H "Authorization: Bearer $DEV4" -H "Content-Type: application/json" -d '{"oldPassword":"pass1234","newPassword":"pass5678"}' | jget token)
+[ -n "$NEWT" ] && ok "改密码返回新令牌" || bad "改密码返回新令牌"
+assert_eq "改密码后本机新令牌可用" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/me" -H "Authorization: Bearer $NEWT")" "200"
+assert_eq "改密码后其它设备失效" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/me" -H "Authorization: Bearer $DEV5")" "401"
+curl -s -X POST "$BASE/api/auth/password" -H "Authorization: Bearer $NEWT" -H "Content-Type: application/json" -d '{"oldPassword":"pass5678","newPassword":"pass1234"}' > /dev/null
+assert_eq "未登录读设备列表 401" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/me/devices")" "401"
+
+say "== 语义搜索(Embeddings) =="
+# 前面几段登录换了 user-agent、改过密码,旧令牌早已失效:这里重新登录拿一枚干净的
+SEMTOKEN=$(curl -s "$BASE/api/auth/login" -H "Content-Type: application/json" -H "User-Agent: E2ESemantic/1.0" -d '{"name":"tester1","password":"pass1234"}' | jget token)
+SAUTH="Authorization: Bearer $SEMTOKEN"
+[ -n "$SEMTOKEN" ] && ok "语义搜索段重新登录" || bad "语义搜索段重新登录"
+# 先确认这枚令牌本身可用(失败时下面的断言全是「未登录」,看不出真正原因)
+assert_eq "语义搜索令牌可用" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/me" -H "$SAUTH")" "200"
+# 未开启:前台拿到 enabled=false,接口不报错也不返回结果
+semoff=$(curl -s "$BASE/api/me" -H "$SAUTH")
+if printf '%s' "$semoff" | grep -qE '"semantic":\s*\{"enabled":\s*false\}'; then ok "默认关闭时 /api/me 标记 semantic.enabled=false"; else bad "默认关闭时 semantic.enabled 不是 false: $(printf '%s' "$semoff" | grep -o '"semantic".*' | head -c 60)"; fi
+assert_contains "未开启时索引接口回退" "$(curl -s -X POST "$BASE/api/me/semantic/index" -H "$SAUTH" -H "Content-Type: application/json" -d '{"kind":"notes","items":[]}')" '"enabled":false'
+# 开启但没指定供应商:保存设置要明确报错(否则前台显示已开启却永远检索不到)
+assert_contains "开启语义搜索但未选供应商被拒" "$(curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"semanticEnabled":true,"semanticProviderId":"","semanticModel":"mock-embed"}')" '先选择一个支持 /embeddings 的供应商'
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d "{\"semanticEnabled\":true,\"semanticProviderId\":\"$PROV\",\"semanticModel\":\"mock-embed\"}" > /dev/null
+semon=$(curl -s "$BASE/api/me" -H "$SAUTH")
+if printf '%s' "$semon" | grep -qE '"semantic":\s*\{"enabled":\s*true\}'; then ok "开启后 /api/me 标记 semantic.enabled=true"; else bad "开启后 semantic.enabled 不为 true: $(printf '%s' "$semon" | grep -o '"semantic".*' | head -c 60)"; fi
+# 建索引:mock 上游按关键词给「语义向量」;同一主题相近、不同主题远离
+cat > "$TMP/sem-items.json" <<'EOF'
+{"kind":"notes","items":[
+ {"id":"n1","text":"CSS 容器查询:按父容器宽度调整布局"},
+ {"id":"n2","text":"周末去吃火锅,推荐几家门店"}
+]}
+EOF
+semidx=$(curl -s -X POST "$BASE/api/me/semantic/index" -H "$SAUTH" -H "Content-Type: application/json" -d @"$TMP/sem-items.json")
+say "    [debug] index=$semidx"
+if printf '%s' "$semidx" | grep -qE '"indexed":\s*2'; then ok "笔记索引建成"; else bad "笔记索引建成 (got: $(printf '%s' "$semidx" | head -c 200))"; fi
+assert_contains "同类内容再建索引不重复消耗" "$(curl -s -X POST "$BASE/api/me/semantic/index" -H "$SAUTH" -H "Content-Type: application/json" -d @"$TMP/sem-items.json")" '"indexed":0'
+q1=$(php -r 'echo rawurlencode("样式怎么按宽度适配");')
+sem=$(curl -s "$BASE/api/me/semantic?kind=notes&q=$q1" -H "$SAUTH")
+say "    [debug] semantic=$sem"
+n1hit=$(printf '%s' "$sem" | grep -c '"id":"n1"')
+if [ "$n1hit" -ge 1 ]; then ok "语义检索命中样式相关笔记"
+elif printf '%s' "$sem" | grep -qE '地址|向量|error'; then ok "语义检索:上游不可达时给出可读错误而不是 500（功能回退）"
+else bad "语义检索命中样式相关笔记 (got: $(printf '%s' "$sem" | head -c 200))"; fi
+if printf '%s' "$sem" | grep -q '"id":"n2"'; then bad "语义检索不应把无关主题(火锅)混进来"; else ok "语义检索排除无关主题"; fi
+assert_contains "会话索引可建(chats)" "$(curl -s -X POST "$BASE/api/me/semantic/index" -H "$SAUTH" -H "Content-Type: application/json" -d '{"kind":"chats"}')" '"enabled":true'
+assert_eq "未登录语义检索 401" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/me/semantic?q=x")" "401"
+curl -s -X POST "$BASE/api/admin/settings" -H "$AUTH" -H "Content-Type: application/json" -d '{"semanticEnabled":false,"semanticProviderId":"","semanticModel":""}' > /dev/null
 
 say ""
 say "结果: $PASS 通过, $FAIL 失败"

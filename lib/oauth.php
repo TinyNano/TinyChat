@@ -606,8 +606,20 @@ function tc_api_oauth_exchange() {
     $needsProfile = !empty($settings['oauthRequireProfile'])
         && (!isset($user['passwordHash']) || (string) $user['passwordHash'] === '');
     $pub = tc_sanitize_user($user);
+    // 第三方登录也是一次登录:登记设备(设置 → 账户 → 登录设备里可见、可单独踢下线)
+    $sid = tc_device_register($user);
+    $sessions = $user['sessions'];
+    $oauthId = $user['id'];
+    tc_with_db(true, function (&$db) use ($oauthId, $sessions) {
+        foreach ($db['users'] as &$uu) {
+            if ((string) $uu['id'] !== (string) $oauthId) continue;
+            $uu['sessions'] = $sessions;
+            break;
+        }
+        unset($uu);
+    });
     tc_json(200, array(
-        'token' => tc_issue_token($user, $settings),
+        'token' => tc_issue_token($user, $settings, $sid),
         'user' => $pub,
         'needsProfile' => $needsProfile,
     ));

@@ -573,6 +573,150 @@
     return mask;
   };
 
+  // ============ 人机验证(登录页与主站登录弹窗共用) ============
+  // cfg 是 GET /api/config 下发的 captcha 块:{provider, siteKey, login, register, reset, guest}。
+  // provider=builtin 渲染服务端生成的 SVG 图形验证码(答案只存服务端,前端拿到的是图片);
+  // provider=turnstile 惰性加载 Cloudflare 官方 widget。未启用的入口容器保持隐藏。
+  // 页面在表单里静态声明容器(<div class="oc-captcha hidden" data-cap="login"></div>),
+  // 然后调 mount / required / payload / reset 四件套(见下方各方法注释)。
+  const CAP_STATE = {}; // entry → {cfg, provider, id, token, widgetId}
+
+  UI.captchaRequired = function (cfg, entry) {
+    return !!(cfg && cfg.provider && cfg.provider !== 'none' && cfg[entry]);
+  };
+
+  // Turnstile api.js 惰性加载:第一个需要渲染的入口触发,加载完再回调
+  let capTnLoading = null;
+  function capLoadTurnstile(cb) {
+    if (window.turnstile) return cb();
+    if (!capTnLoading) {
+      capTnLoading = new Promise((resolve) => {
+        const s = document.createElement('script');
+        s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        s.async = true;
+        s.onload = () => resolve(true);
+        s.onerror = () => resolve(false);
+        document.head.appendChild(s);
+      });
+    }
+    capTnLoading.then((ok) => { if (ok) cb(); });
+  }
+
+  // 渲染 Turnstile widget:主题跟随站点深浅色(官方 widget 的主题只在渲染时确定)
+  function capRenderWidget(st, box, cfg) {
+    return window.turnstile.render(box, {
+      sitekey: cfg.siteKey || '',
+      theme: UI.resolveTheme() === 'dark' ? 'dark' : 'light',
+      callback: (t) => { st.token = String(t || ''); },
+      'expired-callback': () => { st.token = ''; },
+      'error-callback': () => { st.token = ''; return true; },
+    });
+  }
+
+  // 把验证组件渲染进 el。cfg 未启用该入口时隐藏容器并清掉旧状态。
+  UI.captchaMount = function (el, cfg, entry) {
+    if (!el) return;
+    const st = CAP_STATE[entry] || (CAP_STATE[entry] = { cfg: null, provider: 'none', id: '', token: '', widgetId: null });
+    st.cfg = cfg || null;
+    if (!UI.captchaRequired(cfg, entry)) {
+      el.classList.add('hidden');
+      el.innerHTML = '';
+      st.provider = 'none'; st.id = ''; st.token = ''; st.widgetId = null;
+      return;
+    }
+    st.provider = cfg.provider;
+    el.classList.remove('hidden');
+    el.innerHTML = '';
+    if (cfg.provider === 'turnstile') {
+      el.innerHTML = '<div class="oc-captcha-turnstile"></div>';
+      st.token = ''; st.widgetId = null;
+      capLoadTurnstile(() => {
+        const box = el.querySelector('.oc-captcha-turnstile');
+        if (!window.turnstile || !box) return;
+        try {
+          st.widgetId = capRenderWidget(st, box, cfg);
+        } catch (e) { st.token = ''; }
+      });
+      return;
+    }
+    // builtin:服务端 SVG + 换一张 + 答案输入
+    el.innerHTML =
+      '<div class="oc-captcha-builtin">'
+      + '<div class="oc-captcha-chip"><img class="oc-captcha-img" alt="验证码图片" draggable="false"></div>'
+      + '<button type="button" class="oc-captcha-refresh" title="换一张" aria-label="换一张验证码">'
+      + '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>'
+      + '</button>'
+      + '<input type="text" class="oc-captcha-answer" maxlength="4" placeholder="输入图中字符" autocomplete="off" spellcheck="false">'
+      + '</div>';
+    st.id = ''; st.token = '';
+    const input = el.querySelector('.oc-captcha-answer');
+    input.addEventListener('input', () => {
+      input.value = input.value.replace(/[^0-9a-z]/gi, '').slice(0, 4);
+    });
+    el.querySelector('.oc-captcha-refresh').addEventListener('click', () => { UI.captchaReset(entry); input.focus(); });
+    UI.captchaReset(entry);
+  };
+
+  // 该入口是否要求人机验证(按最近一次 mount 传入的 cfg 判定)
+  UI.captchaEntryRequired = function (entry) {
+    const st = CAP_STATE[entry];
+    return !!(st && UI.captchaRequired(st.cfg, entry));
+  };
+
+  // 取要拼进请求体的验证载荷。未启用 → null(调用方照常提交);
+  // 启用但未完成(没输答案 / Turnstile 没出 token)→ 也返回 null,调用方应先 required() 判定。
+  UI.captchaPayload = function (entry) {
+    const st = CAP_STATE[entry];
+    if (!st || !UI.captchaRequired(st.cfg, entry)) return null;
+    if (st.provider === 'turnstile') return st.token ? { turnstileToken: st.token } : null;
+    const input = document.querySelector('[data-cap="' + entry + '"] .oc-captcha-answer');
+    const ans = input ? String(input.value || '').trim() : '';
+    return (st.id && ans) ? { captcha: { id: st.id, answer: ans } } : null;
+  };
+
+  // 刷新挑战:builtin 重拉一张新码(答案输错/过期后调);turnstile 重置 widget 重出 token
+  UI.captchaReset = function (entry) {
+    const st = CAP_STATE[entry];
+    if (!st) return;
+    if (st.provider === 'turnstile') {
+      st.token = '';
+      try { if (window.turnstile && st.widgetId != null) window.turnstile.reset(st.widgetId); } catch (e) {}
+      return;
+    }
+    if (st.provider !== 'builtin') return;
+    const box = document.querySelector('[data-cap="' + entry + '"]');
+    if (!box) return;
+    const img = box.querySelector('.oc-captcha-img');
+    const input = box.querySelector('.oc-captcha-answer');
+    if (input) input.value = '';
+    if (!img) return;
+    st.id = '';
+    fetch((window.API_BASE || '') + '/api/captcha/new')
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d || !d.id || !d.svg) throw new Error('no captcha');
+        st.id = String(d.id);
+        img.src = 'data:image/svg+xml;utf8,' + encodeURIComponent(String(d.svg));
+      })
+      .catch(() => { st.id = ''; img.removeAttribute('src'); });
+  };
+
+  // 主题切换时重渲染已挂载的 Turnstile widget(其外观只在渲染时确定,reset 改不了主题)。
+  // 内置验证码不受影响——浅底码片两种主题下都成立。
+  UI.captchaSyncTheme = function () {
+    if (!window.turnstile) return;
+    for (const entry of Object.keys(CAP_STATE)) {
+      const st = CAP_STATE[entry];
+      if (!st || st.provider !== 'turnstile' || st.widgetId == null) continue;
+      const box = document.querySelector('[data-cap="' + entry + '"] .oc-captcha-turnstile');
+      if (!box) continue;
+      try {
+        window.turnstile.remove(st.widgetId);
+        st.widgetId = capRenderWidget(st, box, st.cfg || {});
+      } catch (e) { /* 保留旧 widget,下一次切主题再试 */ }
+    }
+  };
+
   // ============ 主题 ============
   const HLJS = { light: '/vendor/highlight/github.min.css', dark: '/vendor/highlight/github-dark.min.css' };
   UI.resolveTheme = function (mode) {
@@ -591,6 +735,10 @@
     if (meta) meta.setAttribute('content', resolved === 'dark' ? '#000000' : '#ffffff');
     if (window.OCRenderer && typeof window.OCRenderer.syncMermaidTheme === 'function') {
       try { window.OCRenderer.syncMermaidTheme(); } catch (e) {}
+    }
+    // Turnstile 组件跟随主题重渲染(浅色/深色外观只在渲染时确定)
+    if (typeof UI.captchaSyncTheme === 'function') {
+      try { UI.captchaSyncTheme(); } catch (e) {}
     }
     UI.applyAppearance();
     if (typeof opts.onChange === 'function') opts.onChange(resolved);

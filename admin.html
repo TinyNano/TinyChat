@@ -9,16 +9,16 @@
 <meta name="robots" content="noindex,nofollow">
 <link rel="icon" type="image/svg+xml" href="./logo-icon.svg">
 <link rel="apple-touch-icon" href="./static/logo/app-icon-192.png">
-<link rel="stylesheet" href="./static/css/style.min.css?v=2.1.1">
-<link rel="stylesheet" href="./vendor/highlight/github.min.css?v=2.1.1" id="hljs-theme">
-<link rel="stylesheet" href="./vendor/katex/katex.min.css?v=2.1.1">
-<link rel="stylesheet" href="./static/css/enhanced.min.css?v=2.1.1">
-<link rel="stylesheet" href="./static/css/refine.min.css?v=2.1.1">
-<link rel="stylesheet" href="./static/css/redesign.min.css?v=2.1.1">
-<link rel="stylesheet" href="./static/css/polish.min.css?v=2.1.1">
-<link rel="stylesheet" href="./static/css/markdown.min.css?v=2.1.1">
-<link rel="stylesheet" href="./static/css/chrome.min.css?v=2.1.1">
-<script src="./static/js/theme-boot.min.js?v=2.1.1"></script>
+<link rel="stylesheet" href="./static/css/style.min.css?v=2.2.0">
+<link rel="stylesheet" href="./vendor/highlight/github.min.css?v=2.2.0" id="hljs-theme">
+<link rel="stylesheet" href="./vendor/katex/katex.min.css?v=2.2.0">
+<link rel="stylesheet" href="./static/css/enhanced.min.css?v=2.2.0">
+<link rel="stylesheet" href="./static/css/refine.min.css?v=2.2.0">
+<link rel="stylesheet" href="./static/css/redesign.min.css?v=2.2.0">
+<link rel="stylesheet" href="./static/css/polish.min.css?v=2.2.0">
+<link rel="stylesheet" href="./static/css/markdown.min.css?v=2.2.0">
+<link rel="stylesheet" href="./static/css/chrome.min.css?v=2.2.0">
+<script src="./static/js/theme-boot.min.js?v=2.2.0"></script>
 </head>
 <body class="admin-body">
 <form id="admin-fields" autocomplete="off" style="display:contents">
@@ -148,6 +148,18 @@
       <div class="pkg-form-grid">
         <label class="field"><span>「可用」阈值（成功率 ≥ %）</span><input id="chat-health-ok" type="number" min="1" max="100" step="1" value="75"></label>
         <label class="field"><span>「不稳定」阈值（成功率 ≥ %）</span><input id="chat-health-warn" type="number" min="0" max="99" step="1" value="40"></label>
+      </div>
+      <h3>搜索</h3>
+      <p class="muted small" style="margin:0 0 8px">侧栏搜索默认在服务端用 SQLite FTS5 做全文检索（中文按子串匹配，能搜到本机没打开过的会话）。主机未启用 FTS5 时自动退回浏览器本地过滤，无需处理。<b>语义搜索</b>需要另配一个支持 <code>/embeddings</code> 的供应商与模型：开启后，会话搜索与「问笔记」会在关键词结果之外补一层按意思相近的召回，并按该模型价格计费。</p>
+      <label class="user-form-admin"><span class="switch"><input type="checkbox" id="chat-search-enabled" checked><span class="slider"></span></span><span>服务端全文搜索（FTS5）</span></label>
+      <label class="user-form-admin"><span class="switch"><input type="checkbox" id="semantic-enabled"><span class="slider"></span></span><span>语义搜索（Embeddings）</span></label>
+      <div class="pkg-form-grid">
+        <label class="field"><span>Embeddings 供应商</span>
+          <select id="semantic-provider"><option value="">（未指定）</option></select>
+        </label>
+        <label class="field"><span>Embeddings 模型名（如 text-embedding-3-small / bge-m3）</span>
+          <input id="semantic-model" maxlength="120" autocomplete="off" placeholder="text-embedding-3-small">
+        </label>
       </div>
       <button class="btn primary" id="chat-limits-save" type="button">保存对话设置</button>
     </div>
@@ -718,6 +730,28 @@
         <label class="field"><span>登录锁定时长（秒）</span><input id="login-lock-sec" type="number" min="0" max="3600" value="60"></label>
       </div>
       <label class="user-form-admin" style="margin-top:8px"><span class="switch"><input type="checkbox" id="user-providers-allowed"><span class="slider"></span></span><span>允许用户添加自己的供应商（自带 Key，不计站点次数）</span></label>
+      <h3>人机验证</h3>
+      <p class="muted small" style="margin:0 0 8px">在登录 / 注册 / 找回密码 / 游客体验四个入口拦截脚本与批量注册。校验不通过一律拒绝（含验证服务暂时不可用时——宁可让人稍后再试，也不静默放行）。第三方 OAuth 一键登录不经过人机验证。</p>
+      <label class="field"><span>验证方式</span>
+        <select id="captcha-provider">
+          <option value="none">关闭</option>
+          <option value="builtin">内置图形验证码（零配置，纯 PHP 生成）</option>
+          <option value="turnstile">Cloudflare Turnstile</option>
+        </select>
+      </label>
+      <div class="pkg-form-grid">
+        <label class="field hidden" id="captcha-sitekey-row"><span>Turnstile Site Key（公开，可与 Secret Key 在 Cloudflare 后台一并获取）</span><input id="captcha-site-key" autocomplete="off" maxlength="200"></label>
+        <label class="field hidden" id="captcha-secretkey-row"><span>Turnstile Secret Key（保存后只显示掩码）</span><input id="captcha-secret-key" type="password" autocomplete="off" maxlength="200"></label>
+      </div>
+      <p class="muted small hidden" id="captcha-turnstile-note" style="margin:0 0 8px">服务器需能访问 <code>challenges.cloudflare.com</code>（8 秒超时）；国内网络建议先在「对话设置」配置出站代理。</p>
+      <label class="user-form-admin"><span class="switch"><input type="checkbox" id="captcha-on-login" checked><span class="slider"></span></span><span>登录入口启用</span></label>
+      <label class="user-form-admin"><span class="switch"><input type="checkbox" id="captcha-on-register" checked><span class="slider"></span></span><span>注册入口启用</span></label>
+      <label class="user-form-admin"><span class="switch"><input type="checkbox" id="captcha-on-reset" checked><span class="slider"></span></span><span>找回密码入口启用</span></label>
+      <label class="user-form-admin"><span class="switch"><input type="checkbox" id="captcha-on-guest" checked><span class="slider"></span></span><span>游客体验入口启用（开启后访客进站需先完成验证）</span></label>
+      <div class="row-between" style="gap:8px;flex-wrap:wrap;margin-top:10px">
+        <button class="btn" id="captcha-test-btn" type="button" style="white-space:nowrap">测试连通性</button>
+        <span class="muted small" style="flex:1;min-width:200px">测试的是<b>已保存</b>的配置（先保存再测）。内置模式自跑一次生成→校验闭环；Turnstile 模式探测 Cloudflare 可达性与 Secret Key 有效性——连不通时所有入口都会被拦截，务必先测。</span>
+      </div>
       <h3>账号注销</h3>
       <p class="muted small" style="margin:0 0 8px">用户在「设置 → 账户」可自助注销。<b>软注销</b>会清除其资料、对话与自建供应商，并把用户名改为「原名-已注销-随机码」、邮箱加 <code>deleted+</code> 前缀 —— 因此原用户名与原邮箱都可被重新注册；账号记录保留，便于后台追溯。<b>硬注销</b>则直接删除账号及其全部数据，不可恢复。</p>
       <label class="field"><span>注销方式</span>
@@ -1322,17 +1356,17 @@
   </div>
 </div>
 </form>
-<script defer src="./static/js/config.min.js?v=2.1.1"></script>
-<script defer src="./static/js/icons.min.js?v=2.1.1"></script>
-<script defer src="./vendor/markdown-it/markdown-it.min.js?v=2.1.1"></script>
-<script defer src="./vendor/markdown-it/markdown-it-footnote.min.js?v=2.1.1"></script>
-<script defer src="./vendor/markdown-it/markdown-it-emoji.min.js?v=2.1.1"></script>
-<script defer src="./vendor/dompurify/purify.min.js?v=2.1.1"></script>
-<script defer src="./vendor/katex/katex.min.js?v=2.1.1"></script>
-<script defer src="./vendor/highlight/highlight.min.js?v=2.1.1"></script>
-<script defer src="./static/js/ui.min.js?v=2.1.1"></script>
-<script defer src="./static/js/components.min.js?v=2.1.1"></script>
-<script defer src="./static/js/renderer.min.js?v=2.1.1"></script>
-<script defer src="./static/js/admin.min.js?v=2.1.1"></script>
+<script defer src="./static/js/config.min.js?v=2.2.0"></script>
+<script defer src="./static/js/icons.min.js?v=2.2.0"></script>
+<script defer src="./vendor/markdown-it/markdown-it.min.js?v=2.2.0"></script>
+<script defer src="./vendor/markdown-it/markdown-it-footnote.min.js?v=2.2.0"></script>
+<script defer src="./vendor/markdown-it/markdown-it-emoji.min.js?v=2.2.0"></script>
+<script defer src="./vendor/dompurify/purify.min.js?v=2.2.0"></script>
+<script defer src="./vendor/katex/katex.min.js?v=2.2.0"></script>
+<script defer src="./vendor/highlight/highlight.min.js?v=2.2.0"></script>
+<script defer src="./static/js/ui.min.js?v=2.2.0"></script>
+<script defer src="./static/js/components.min.js?v=2.2.0"></script>
+<script defer src="./static/js/renderer.min.js?v=2.2.0"></script>
+<script defer src="./static/js/admin.min.js?v=2.2.0"></script>
 </body>
 </html>

@@ -535,7 +535,10 @@ function tc_sanitize_chats($chats) {
         if (isset($c['messages']) && is_array($c['messages'])) {
             foreach (array_slice($c['messages'], -800) as $m) {
                 if (!is_array($m)) continue;
-                $role = isset($m['role']) && in_array($m['role'], array('user', 'assistant', 'system'), true) ? $m['role'] : 'assistant';
+                // role:'tool' 是工具调用结果(Function calling)。不放行的话,客户端把会话
+                // 推回云端一次,工具结果就被清空,下一轮请求里 assistant.tool_calls 指向一条
+                // 不存在的 result,上游直接 400 —— 会话从此发不出消息。
+                $role = isset($m['role']) && in_array($m['role'], array('user', 'assistant', 'system', 'tool'), true) ? $m['role'] : 'assistant';
                 $msg = array(
                     'role' => $role,
                     'content' => tc_md_safe_cut(array_key_exists('content', $m) && $m['content'] !== null ? $m['content'] : '', 200000),
@@ -565,6 +568,30 @@ function tc_sanitize_chats($chats) {
                         $atts[] = $att;
                     }
                     if ($atts) $msg['attachments'] = $atts;
+                }
+                // 工具调用 / 工具结果的两个关联字段:少了任意一个,历史里就剩下「有调用没结果」
+                // 或「有结果没调用」,上游会拒绝整段历史。参数与结果都按文本原样存,不改格式。
+                if ($role === 'tool') {
+                    if (isset($m['tool_call_id']) && is_string($m['tool_call_id']) && $m['tool_call_id'] !== '') {
+                        $msg['tool_call_id'] = substr($m['tool_call_id'], 0, 200);
+                    }
+                    if (isset($m['name']) && is_string($m['name']) && $m['name'] !== '') $msg['name'] = substr($m['name'], 0, 200);
+                    if (!empty($m['toolError'])) $msg['toolError'] = true;
+                } elseif (isset($m['toolCalls']) && is_array($m['toolCalls'])) {
+                    $tcalls = array();
+                    foreach (array_slice($m['toolCalls'], 0, 32) as $tc) {
+                        if (!is_array($tc) || !isset($tc['id'])) continue;
+                        $fn = isset($tc['function']) && is_array($tc['function']) ? $tc['function'] : array();
+                        $tcalls[] = array(
+                            'id' => substr((string) $tc['id'], 0, 200),
+                            'type' => 'function',
+                            'function' => array(
+                                'name' => substr((string) (isset($fn['name']) ? $fn['name'] : ''), 0, 200),
+                                'arguments' => substr((string) (isset($fn['arguments']) ? $fn['arguments'] : ''), 0, 100000),
+                            ),
+                        );
+                    }
+                    if ($tcalls) $msg['toolCalls'] = $tcalls;
                 }
                 foreach (array('vote', 'followUps', 'citations', 'model', 'reasoning', 'error', 'interrupted', 'failNote', 'elapsedMs', 'createdAt', 'usage', 'contextCount', 'contextLimit', 'taskId', 'taskSeq', 'taskStatus', 'taskFormat') as $k) {
                     if (array_key_exists($k, $m) && $m[$k] !== null) $msg[$k] = $m[$k];
@@ -829,8 +856,11 @@ function tc_api_append_chat(&$db, $userId, $messages, $meta = array()) {
     $clean = array();
     foreach ($messages as $m) {
         if (!is_array($m)) continue;
-        $role = isset($m['role']) && in_array($m['role'], array('user', 'assistant'), true) ? $m['role'] : 'assistant';
+        $role = isset($m['role']) && in_array($m['role'], array('user', 'assistant', 'tool'), true) ? $m['role'] : 'assistant';
         $row = array('role' => $role, 'content' => (string) (isset($m['content']) ? $m['content'] : ''), 'createdAt' => $now);
+        // 工具调用与结果:开放 API 的 Agent 多轮会话要完整留档,否则回放时对不上 id
+        if ($role === 'tool' && isset($m['tool_call_id']) && $m['tool_call_id'] !== '') $row['tool_call_id'] = (string) $m['tool_call_id'];
+        if ($role === 'assistant' && !empty($m['toolCalls']) && is_array($m['toolCalls'])) $row['toolCalls'] = $m['toolCalls'];
         if ($role === 'assistant' && $model !== '') $row['model'] = $model;
         if ($role === 'assistant' && isset($meta['usage']) && is_array($meta['usage'])) {
             $row['usage'] = array(
@@ -1161,6 +1191,22 @@ function tc_api_env_check() {
     tc_json(200, array('checks' => $checks, 'allOk' => $allOk, 'dataDir' => $dir));
 }
 
+// 人机验证的匿名公开配置:前端据此决定在哪些入口渲染哪种验证组件。
+// siteKey 是公开值(turnstile widget 要用);secretKey 只留在服务端,任何响应都不下发。
+function tc_public_captcha_config($s) {
+    $provider = isset($s['captchaProvider']) ? (string) $s['captchaProvider'] : 'none';
+    if ($provider !== 'builtin' && $provider !== 'turnstile') $provider = 'none';
+    return array(
+        'provider' => $provider,
+        // 内置验证码不需要 siteKey;turnstile 未填 siteKey 时前台视同未启用
+        'siteKey' => $provider === 'turnstile' ? (string) (isset($s['captchaSiteKey']) ? $s['captchaSiteKey'] : '') : '',
+        'login' => $provider !== 'none' && !empty($s['captchaOnLogin']),
+        'register' => $provider !== 'none' && !empty($s['captchaOnRegister']),
+        'reset' => $provider !== 'none' && !empty($s['captchaOnReset']),
+        'guest' => $provider !== 'none' && !empty($s['captchaOnGuest']),
+    );
+}
+
 function tc_api_public_config($db) {
     $s = $db['settings'];
     tc_json(200, array(
@@ -1206,6 +1252,8 @@ function tc_api_public_config($db) {
         // 游客模式:允许未登录访客直接体验对话
         'guestEnabled' => !empty($s['guestEnabled']),
         'guestRounds' => isset($s['guestRounds']) ? (int) $s['guestRounds'] : 3,
+        // 人机验证:provider=none|builtin|turnstile + 各入口开关;siteKey 公开、secretKey 绝不下发
+        'captcha' => tc_public_captcha_config($s),
         // AI 笔记:前台据此决定入口是否显示(关闭时隐藏)
         'notesEnabled' => !empty($s['notesEnabled']),
         'notesAllowFiles' => !isset($s['notesAllowFiles']) || !empty($s['notesAllowFiles']),
@@ -1261,8 +1309,10 @@ function tc_api_setup() {
             'tv' => 0,
         );
         tc_set_password($user, $password);
+        // 首次安装即登录:同样登记设备
+        $sid = tc_device_register($user);
         $db['users'][] = $user;
-        tc_json(200, array('token' => tc_issue_token($user, $db['settings']), 'user' => tc_sanitize_user($user)));
+        tc_json(200, array('token' => tc_issue_token($user, $db['settings'], $sid), 'user' => tc_sanitize_user($user)));
     });
 }
 
@@ -1276,6 +1326,16 @@ function tc_render_mail_template($settings, $kind, $name, $link, $expiresText = 
     return array(strtr($subject, $vars), strtr($html, $vars));
 }
 
+// 取一张新的内置图形验证码。每 IP 每分钟 30 张,防被脚本批量拉取转打码平台。
+function tc_api_captcha_new() {
+    if (!tc_rate_limit_check('captcha:' . tc_client_ip(), 30, 60000)) {
+        tc_fail(429, '验证码获取过于频繁，请稍后再试');
+    }
+    $cap = tc_captcha_new();
+    if ($cap === null) tc_fail(503, '验证码服务暂时不可用，请稍后再试');
+    tc_json(200, array('id' => $cap['id'], 'svg' => $cap['svg']));
+}
+
 function tc_api_register() {
     tc_with_db(true, function (&$db) {
         $b = tc_read_json_body();
@@ -1284,6 +1344,8 @@ function tc_api_register() {
         if (!tc_rate_limit_check('reg:' . tc_client_ip(), $regLimit, 3600000)) {
             tc_fail(429, '注册过于频繁，请稍后再试');
         }
+        // 人机验证:放在 IP 限流之后(恶意 IP 先吃 429,不消耗验证码)、开关校验之前
+        tc_captcha_gate($db, $b, 'register');
         if (empty($db['settings']['allowRegister'])) tc_fail(403, '站点已关闭注册，请联系管理员开通账号');
         if (!empty($db['settings']['agreementEnabled']) && empty($b['agreementAccepted'])) tc_fail(400, '请先阅读并同意用户协议');
         $invite = strtoupper(trim((string) ($b['invite'] ?? '')));
@@ -1325,7 +1387,16 @@ function tc_api_register() {
         }
         tc_add_quota($db, $user, !empty($db['settings']['freeQuotaUnlimited']) ? -1 : $db['settings']['freeQuota']);
         if (!empty($db['settings']['emailVerificationEnabled'])) { $link = tc_public_base_url() . '/login?verify=' . rawurlencode($token); [$subject,$html] = tc_render_mail_template($db['settings'], 'verify', $name, $link, '24 小时'); if (!tc_mail_send($db['settings'], $email, $subject, $html, '', $regMailErr)) tc_fail(400, $regMailErr !== '' ? ('验证邮件发送失败：' . $regMailErr) : '验证邮件发送失败，请联系管理员'); tc_json(200, array('ok'=>true,'pendingVerification'=>true,'user'=>tc_sanitize_user($user))); }
-        tc_json(200, array('token' => tc_issue_token($user, $db['settings']), 'user' => tc_sanitize_user($user)));
+        // 注册即登录:登记设备(与登录同一套),设置 → 账户 → 登录设备里可见
+        $sid = tc_device_register($user);
+        $sessions = $user['sessions'];
+        foreach ($db['users'] as &$uu) {
+            if ((string) $uu['id'] !== (string) $user['id']) continue;
+            $uu['sessions'] = $sessions;
+            break;
+        }
+        unset($uu);
+        tc_json(200, array('token' => tc_issue_token($user, $db['settings'], $sid), 'user' => tc_sanitize_user($user)));
     });
 }
 
@@ -1337,6 +1408,8 @@ function tc_api_login() {
         $name = trim((string) (isset($b['name']) ? $b['name'] : ''));
         $password = (string) (isset($b['password']) ? $b['password'] : '');
         if ($name === '' || $password === '') tc_fail(400, '请输入用户名和密码');
+        // 人机验证放在登录失败锁之前:验证码没过不算「登录失败」,不消耗锁定次数
+        tc_captcha_gate($db, $b, 'login');
         $locked = tc_check_login_lock($db['settings'], $name);
         if ($locked) tc_fail(429, '登录失败次数过多，请 ' . $locked . ' 秒后重试');
         $found = null;
@@ -1389,7 +1462,20 @@ function tc_api_login() {
         $settings = $db['settings'];
     });
     tc_log_auth_event('auth', isset($user['name']) ? $user['name'] : '', '登录成功', $seenId);
-    tc_json(200, array('token' => tc_issue_token($user, $settings), 'user' => tc_sanitize_user($user)));
+    // 登录设备:登记 sid(设置 → 账户 → 登录设备里可见、可单独踢下线)。用户行刚从写事务
+    // 里取出来,这里再补一次写把 sessions 落库。
+    $sid = tc_device_register($user);
+    $sessions = $user['sessions'];
+    $loginId = $user['id'];
+    tc_with_db(true, function (&$db) use ($loginId, $sessions) {
+        foreach ($db['users'] as &$uu) {
+            if ((string) $uu['id'] !== (string) $loginId) continue;
+            $uu['sessions'] = $sessions;
+            break;
+        }
+        unset($uu);
+    });
+    tc_json(200, array('token' => tc_issue_token($user, $settings, $sid), 'user' => tc_sanitize_user($user)));
 }
 
 // 登录/注册/游客等认证事件的日志(便于后台审计来源 IP)
@@ -1450,7 +1536,15 @@ function tc_api_auth_mfa() {
         tc_clear_login_fail($found['name']);
         tc_touch_user($db, $found['id']);
         tc_log_auth_event('auth', $found['name'], '两步验证通过', $found['id']);
-        tc_json(200, array('token' => tc_issue_token($found, $db['settings']), 'user' => tc_sanitize_user($found)));
+        $sid = tc_device_register($found);
+        $sessions = $found['sessions'];
+        foreach ($db['users'] as &$uu) {
+            if ((string) $uu['id'] !== (string) $found['id']) continue;
+            $uu['sessions'] = $sessions;
+            break;
+        }
+        unset($uu);
+        tc_json(200, array('token' => tc_issue_token($found, $db['settings'], $sid), 'user' => tc_sanitize_user($found)));
     });
 }
 
@@ -1752,6 +1846,9 @@ function tc_api_guest_login() {
     $GLOBALS['_tc_guest_new'] = false;
     $ctx = tc_with_db(true, function (&$db) {
         if (empty($db['settings']['guestEnabled'])) tc_fail(403, '游客体验已关闭，请注册或登录后使用');
+        $b = tc_read_json_body();
+        // 人机验证:游客建号是刷额度的最廉价入口,先于限流校验(挑战本身已有 /api/captcha/new 限流)
+        tc_captcha_gate($db, $b, 'guest');
         // 每 IP 每小时最多创建 20 个游客账号,防止被用来刷额度
         if (!tc_rate_limit_check('guest:' . tc_client_ip(), 20, 3600000)) {
             tc_fail(429, '游客账号创建过于频繁，请稍后再试');
@@ -1783,8 +1880,20 @@ function tc_api_guest_login() {
         return array('user' => $user, 'settings' => $db['settings']);
     });
     $user = $ctx['user'];
+    // 游客同样是一次登录:登记设备,「登录设备」列表与后台口径一致
+    $sid = tc_device_register($user);
+    $sessions = $user['sessions'];
+    $guestId = $user['id'];
+    tc_with_db(true, function (&$db) use ($guestId, $sessions) {
+        foreach ($db['users'] as &$uu) {
+            if ((string) $uu['id'] !== (string) $guestId) continue;
+            $uu['sessions'] = $sessions;
+            break;
+        }
+        unset($uu);
+    });
     tc_json(200, array(
-        'token' => tc_issue_token($user, $ctx['settings']),
+        'token' => tc_issue_token($user, $ctx['settings'], $sid),
         'user' => tc_sanitize_user($user),
         'guest' => true,
         'rounds' => isset($ctx['settings']['guestRounds']) ? (int) $ctx['settings']['guestRounds'] : 3,
@@ -1818,7 +1927,9 @@ function tc_api_forgot_password() {
         if (!tc_rate_limit_check('forgot:' . tc_client_ip(), 10, 3600000)) {
             tc_fail(429, '请求过于频繁，请稍后再试');
         }
-        $b = tc_read_json_body(); $email = strtolower(trim((string) ($b['email'] ?? ''))); if (!filter_var($email, FILTER_VALIDATE_EMAIL)) tc_fail(400, '邮箱格式不正确');
+        $b = tc_read_json_body();
+        tc_captcha_gate($db, $b, 'reset');
+        $email = strtolower(trim((string) ($b['email'] ?? ''))); if (!filter_var($email, FILTER_VALIDATE_EMAIL)) tc_fail(400, '邮箱格式不正确');
         // 管理员账号不走邮箱自助改密:邮箱一旦被接管(或本就是他人代管),等于把后台交出去。
         // 邮箱与账号是否存在不在此处区分,统一给出同一句提示,避免被用来探测账号。
         foreach ($db['users'] as &$u) if (strtolower((string) ($u['email'] ?? '')) === $email) {
@@ -1874,6 +1985,8 @@ function tc_api_me() {
         $user = tc_require_auth($db);
         tc_json(200, array(
             'user' => tc_sanitize_user($user),
+            // 语义搜索是否已开启(前台据此显示「语义」入口;未开启时入口不出现)
+            'semantic' => function_exists('tc_semantic_public') ? tc_semantic_public($db) : array('enabled' => false),
             // 本账号实际可用的拓展功能(总开关 × 「仅管理员 / 仅名单」访问级别)。
             // /api/config 是匿名的、发不出按人判定的结果,所以按人的那一层放在这里。
             'features' => tc_features_public($db, $user),
@@ -1935,8 +2048,17 @@ function tc_api_change_password() {
         if (strlen($newPwd) > 128) tc_fail(400, '新密码过长');
         if ($hasPassword && $newPwd === $oldPwd) tc_fail(400, '新密码不能与原密码相同');
         tc_set_password($user, $newPwd);
+        // 改密码让其它设备的登录全部失效,只保留当前这台(旧行为是 tv+1,连本机也一起踢掉)
+        $payload = tc_jwt_verify(tc_bearer());
+        $curSid = ($payload && isset($payload['sid'])) ? (string) $payload['sid'] : '';
+        $keep = array();
+        foreach ((isset($user['sessions']) && is_array($user['sessions']) ? $user['sessions'] : array()) as $sid => $row) {
+            if ($curSid !== '' && (string) $sid === $curSid) $keep[$sid] = $row;
+        }
+        $user['sessions'] = $keep;
+        if ($curSid === '' || !isset($keep[$curSid])) $curSid = tc_device_register($user);
         tc_replace_user($db, $user);
-        tc_json(200, array('ok' => true, 'token' => tc_issue_token($user, $db['settings'])));
+        tc_json(200, array('ok' => true, 'token' => tc_issue_token($user, $db['settings'], $curSid)));
     });
 }
 
@@ -2007,7 +2129,10 @@ function tc_api_change_name() {
             break;
         }
         tc_log_auth_event('auth', $name, '修改用户名', $user['id']);
-        tc_json(200, array('ok' => true, 'user' => tc_sanitize_user($user), 'token' => tc_issue_token($user, $db['settings'])));
+        // 改名同样让其它设备重新登录,当前设备无感(新令牌沿用当前 sid)
+        $payload = tc_jwt_verify(tc_bearer());
+        $curSid = ($payload && isset($payload['sid'])) ? (string) $payload['sid'] : '';
+        tc_json(200, array('ok' => true, 'user' => tc_sanitize_user($user), 'token' => tc_issue_token($user, $db['settings'], $curSid)));
     });
 }
 
@@ -2358,6 +2483,10 @@ function tc_api_sync_save_chats() {
             'tombs' => tc_deleted_cap_tombs($tombs),
         ));
         $deleted = tc_deleted_of($db, $user['id']);
+        // 会话搜索(FTS5)索引随保存刷新。与主库共用同一条连接上的独立事务:此时 $chats
+        // 就是即将落库的那份列表,不会出现「索引比库新/旧」的窗口。
+        // 失败只影响搜索,不影响保存结果(tc_search_refresh_after_save 自己吞掉异常)。
+        if (function_exists('tc_search_refresh_after_save')) tc_search_refresh_after_save($user['id'], $chats);
         tc_json(200, array(
             'ok' => true,
             'count' => count($chats),
@@ -4225,6 +4354,10 @@ function tc_api_admin_save_settings() {
         if (isset($src['mistralOcrKey']) && strpos((string) $src['mistralOcrKey'], '••') !== false) {
             unset($src['mistralOcrKey']);
         }
+        // Turnstile secret key:回显的是掩码,含 •• 的提交保持原值不覆盖
+        if (isset($src['captchaSecretKey']) && strpos((string) $src['captchaSecretKey'], '••') !== false) {
+            unset($src['captchaSecretKey']);
+        }
         // 解析通道路由按类别合并:只传部分类别时,未提及的类别保持原值,
         // 不能整表替换——否则「只改 office」会静默把 pdf/image 重置回 MinerU。
         if (array_key_exists('parseChannels', $src)) {
@@ -4254,6 +4387,11 @@ function tc_api_admin_save_settings() {
                 $mergedSmtp['password'] = isset($prevSmtp['password']) ? (string) $prevSmtp['password'] : '';
             }
             $src['smtp'] = $mergedSmtp;
+        }
+        // 语义搜索:开关打开但没指定供应商/模型时明确报错(否则前台显示已开启却永远检索不到)
+        if (!empty($src['semanticEnabled'])
+            && trim((string) (isset($src['semanticProviderId']) ? $src['semanticProviderId'] : (isset($db['settings']['semanticProviderId']) ? $db['settings']['semanticProviderId'] : ''))) === '') {
+            tc_fail(400, '开启语义搜索前请先选择一个支持 /embeddings 的供应商');
         }
         unset($src['defaultGroupId']);
         // 演示开关由"创建演示管理员"驱动,不允许通过普通设置保存直接改写
@@ -4342,6 +4480,52 @@ function tc_api_admin_test_email() {
         tc_push_log(array('kind' => 'mail', 'userName' => $user['name'], 'action' => $ok ? ('发送测试邮件到 ' . $to) : ('测试邮件发送失败: ' . $err)));
         if (!$ok) tc_fail(400, $err !== '' ? $err : '测试邮件发送失败，请检查 SMTP 配置');
         tc_json(200, array('ok' => true, 'to' => $to));
+    });
+}
+
+// 人机验证连通性自检:测的是「已保存」的配置(与测试邮件同款,先保存再测)。
+// builtin:服务端自跑一次「生成挑战 → 校验通过」闭环,证明验证码存储可用;
+// turnstile:向 siteverify 发一个假 token,凭返回区分三种状态——
+//   连不上 / 非 200 → 不可达(fail-closed 下登录会被拦,提示配出站代理);
+//   200 + invalid-input-secret → Secret Key 无效;
+//   200 + 其他失败(假 token 未通过属预期) → 连通正常。
+function tc_api_admin_captcha_test() {
+    tc_with_db(false, function ($db) {
+        tc_require_admin($db);
+        $s = $db['settings'];
+        $provider = isset($s['captchaProvider']) ? (string) $s['captchaProvider'] : 'none';
+        if ($provider === 'none') tc_fail(400, '当前未启用人机验证，请先选择验证方式并保存');
+        if ($provider === 'builtin') {
+            $cap = tc_captcha_new();
+            if ($cap === null) tc_fail(400, '自检失败：验证码存储不可写（检查 data/ 目录权限），此时所有入口都会被拒绝');
+            $file = tc_captcha_dir() . '/' . $cap['id'] . '.json';
+            $rec = json_decode((string) @file_get_contents($file), true);
+            $answer = is_array($rec) && !empty($rec['answer']) ? (string) $rec['answer'] : '';
+            if ($answer === '') tc_fail(400, '自检失败：挑战文件写入后不可读（检查 data/ 目录权限）');
+            $err = tc_captcha_verify($cap['id'], $answer);
+            if ($err !== null) tc_fail(400, '自检失败：正确答案未通过校验（' . $err . '）');
+            tc_json(200, array('ok' => true, 'message' => '内置验证码自检通过：生成 → 校验闭环正常'));
+        }
+        // turnstile
+        $secret = isset($s['captchaSecretKey']) ? trim((string) $s['captchaSecretKey']) : '';
+        if ($secret === '') tc_fail(400, '请先保存 Turnstile Secret Key 再测试');
+        $body = http_build_query(array('secret' => $secret, 'response' => 'tc-selftest-' . bin2hex(random_bytes(8)), 'remoteip' => tc_client_ip()));
+        $res = tc_http_request(tc_turnstile_verify_url(), 'POST',
+            array('Content-Type' => 'application/x-www-form-urlencoded'),
+            $body, 8000, false);
+        if (!$res['ok'] || (int) $res['status'] !== 200) {
+            tc_fail(400, '无法连接 Cloudflare（siteverify 不可达）。当前 fail-closed 策略下登录 / 注册 / 找回密码 / 游客体验都会被拦截，请检查服务器出站网络或在「对话设置」配置出站代理');
+        }
+        $j = json_decode((string) (isset($res['body']) ? $res['body'] : ''), true);
+        $codes = is_array($j) && isset($j['error-codes']) && is_array($j['error-codes']) ? $j['error-codes'] : array();
+        if (is_array($j) && !empty($j['success'])) {
+            // 假 token 被判成功按理不会发生,真发生了也当作连通正常
+            tc_json(200, array('ok' => true, 'message' => '连通正常：Cloudflare 可达且校验通过'));
+        }
+        if (in_array('invalid-input-secret', $codes, true)) {
+            tc_fail(400, 'Secret Key 无效（Cloudflare 拒绝了该密钥），请核对后台填写的 Secret Key');
+        }
+        tc_json(200, array('ok' => true, 'message' => '连通正常：Cloudflare 可达，Secret Key 已被接受（测试 token 未通过属预期）'));
     });
 }
 

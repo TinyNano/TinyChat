@@ -190,6 +190,33 @@ if (strpos($uri, 'images/generations') !== false) {
     echo json_encode(array('created' => time(), 'data' => $d));
     return;
 }
+// ---- Embeddings mock(语义搜索):按关键词给一个 8 维"语义"向量 ----
+// 不用真模型,但保持可判别的性质:同一主题的文本向量相近,不同主题相差很远。
+// 「容器查询 / CSS / 布局」→ 维度 0,「火锅 / 餐饮」→ 维度 1,其余落在维度 2。
+// 这样 e2e 能断言「问『样式怎么按宽度适配』能召回讲容器查询的会话,而不是火锅那条」。
+if (strpos($uri, '/embeddings') !== false) {
+    $topics = array(
+        array('容器查询', 'css', '布局', '样式', 'width', 'container'),
+        array('火锅', '餐饮', '吃', '门店'),
+    );
+    $inputs = is_array($body) && isset($body['input']) ? $body['input'] : array();
+    if (!is_array($inputs)) $inputs = array($inputs);
+    $data = array();
+    foreach ($inputs as $i => $text) {
+        $t = function_exists('mb_strtolower') ? mb_strtolower((string) $text, 'UTF-8') : strtolower((string) $text);
+        $v = array(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        foreach ($topics as $ti => $words) {
+            foreach ($words as $w) {
+                if ($w !== '' && mb_strpos($t, $w) !== false) $v[$ti] += 1.0;
+            }
+        }
+        $v[2] = 0.2;   // 兜底一个常量分量,避免全零向量
+        $data[] = array('object' => 'embedding', 'index' => $i, 'embedding' => $v);
+    }
+    echo json_encode(array('object' => 'list', 'data' => $data, 'model' => isset($body['model']) ? $body['model'] : 'mock-embed',
+        'usage' => array('prompt_tokens' => 0, 'total_tokens' => 0)));
+    return;
+}
 if (strpos($uri, '/models') !== false && strpos($uri, 'chat') === false) {
     echo json_encode(array('object' => 'list', 'data' => array(
         array('id' => 'mock-model', 'object' => 'model'),
@@ -277,6 +304,42 @@ if (is_array($body) && isset($body['model']) && $body['model'] === 'mock-archive
         ), 'finish_reason' => 'stop')),
         'usage' => array('prompt_tokens' => 1500, 'completion_tokens' => 500),
     ));
+    return;
+}
+// 工具调用按请求模型开关:mock-tool-stream 的流式回复只下发 tool_calls 分片(与真实上游一致:
+// 先 id/name、后 arguments 分片、最后 finish_reason=tool_calls),用于验证透传不丢字段。
+$toolModel = is_array($body) && isset($body['model']) ? (string) $body['model'] : '';
+if ($toolModel === 'mock-tool-stream' || $toolModel === 'mock-tool-call') {
+    if (!empty($body['stream'])) {
+        header('Content-Type: text/event-stream');
+        header('X-Accel-Buffering: no');
+        while (ob_get_level()) ob_end_flush();
+        $frames = array(
+            array('choices' => array(array('index' => 0, 'delta' => array('role' => 'assistant', 'tool_calls' => array(array('index' => 0, 'id' => 'call_mock_s1', 'type' => 'function', 'function' => array('name' => 'get_weather', 'arguments' => ''))))))),
+            array('choices' => array(array('index' => 0, 'delta' => array('tool_calls' => array(array('index' => 0, 'function' => array('arguments' => '{"city":'))))))),
+            array('choices' => array(array('index' => 0, 'delta' => array('tool_calls' => array(array('index' => 0, 'function' => array('arguments' => '"北京"}'))))))),
+            array('choices' => array(array('index' => 0, 'delta' => array(), 'finish_reason' => 'tool_calls')), 'usage' => array('prompt_tokens' => 20, 'completion_tokens' => 8)),
+        );
+        foreach ($frames as $f) {
+            $f['id'] = 'mock'; $f['object'] = 'chat.completion.chunk';
+            echo 'data: ' . json_encode($f, JSON_UNESCAPED_UNICODE) . "
+
+";
+            flush();
+        }
+        echo "data: [DONE]
+
+";
+        return;
+    }
+    echo json_encode(array(
+        'id' => 'mock-tool', 'object' => 'chat.completion', 'model' => 'mock-model',
+        'choices' => array(array('index' => 0, 'message' => array(
+            'role' => 'assistant', 'content' => null,
+            'tool_calls' => array(array('id' => 'call_mock_1', 'type' => 'function', 'function' => array('name' => 'get_weather', 'arguments' => '{"city":"北京"}'))),
+        ), 'finish_reason' => 'tool_calls')),
+        'usage' => array('prompt_tokens' => 20, 'completion_tokens' => 8),
+    ), JSON_UNESCAPED_UNICODE);
     return;
 }
 if (is_array($body) && !empty($body['stream'])) {

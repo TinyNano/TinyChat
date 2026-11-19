@@ -1553,6 +1553,33 @@
     scored.sort((a, b) => b.score - a.score || (b.note.updatedAt || 0) - (a.note.updatedAt || 0));
     return scored.slice(0, limit || 5);
   }
+  // 语义检索(Embeddings,后台开启后可用):把「问笔记」的关键词召回补上一层向量召回。
+  // 索引按需在后台建:先 POST 一次全部笔记的标题+正文,下一次提问就能用上。
+  let semanticOn = false;
+  let semanticIndexed = false;
+  N.setSemanticEnabled = function (on) { semanticOn = !!on; };
+  function noteSemanticIndex() {
+    if (!semanticOn || semanticIndexed || !N.doc.notes.length) return Promise.resolve(false);
+    const items = N.doc.notes.slice(0, 400).map((n) => ({
+      id: n.id,
+      text: (n.title || '') + '\n' + String(n.content || '').slice(0, 3000),
+    }));
+    return api('/api/me/semantic/index', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'notes', items: items }),
+    }).then((r) => { semanticIndexed = r.ok; return r.ok; }).catch(() => false);
+  }
+  async function semanticRecallNotes(q) {
+    if (!semanticOn) return [];
+    try {
+      if (!semanticIndexed) { await noteSemanticIndex(); return []; }
+      const r = await api('/api/me/semantic?kind=notes&q=' + encodeURIComponent(q));
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d || !Array.isArray(d.hits)) return [];
+      return d.hits.map((h) => ({ note: noteById(h.id), score: h.score })).filter((x) => x.note);
+    } catch (e) { return []; }
+  }
+
   function openAskNotes() {
     const mask = document.createElement('div');
     mask.className = 'modal-mask notes-ask-mask hidden';
@@ -1581,6 +1608,18 @@
       const hits = recallNotes(q, 5);
       ans.innerHTML = '<div class="ask-loading"><span class="nab-spin"></span>正在阅读你的笔记…</div>';
       try {
+        // 语义召回补位:关键词没命中的相关笔记按向量相似度补进来(去重后最多仍取 5 篇)
+        if (semanticOn) {
+          const sem = await semanticRecallNotes(q);
+          if (sem.length) refreshUsage();
+          const have = {};
+          hits.forEach((h) => { have[h.note.id] = true; });
+          sem.forEach((h) => {
+            if (hits.length >= 5 || have[h.note.id]) return;
+            have[h.note.id] = true;
+            hits.push({ note: h.note, score: 0, semantic: true });
+          });
+        }
         let ctx = '';
         hits.forEach((h, i) => {
           ctx += '\n\n【笔记' + (i + 1) + '】标题：' + h.note.title + '\n' + String(h.note.content || '').slice(0, 3000);
@@ -2428,8 +2467,13 @@
     const preview = pane.querySelector('#ne-preview');
     ta.value = n.content || '';
     N.editor = { noteId: n.id, ta, preview, dirty: false, saveTimer: null, renderTimer: null };
+    {
+      const oldBl = pane.querySelector('.notes-backlinks');
+      if (oldBl) oldBl.remove();
+    }
     renderPreview(n.content || '');
     renderAttachCards();
+    // 切换笔记时先收掉上一篇的反向链接面板(renderPreview 只在有链时才重建它)
     resetHistory(n.id);
 
 
@@ -3014,15 +3058,133 @@
     if (panes) panes.parentNode.insertBefore(box, panes.nextSibling);
   }
 
+  // ============ [[双链]] 与反向链接 ============
+  // 语法:[[标题]] 或 [[标题|显示文字]]。渲染时整篇正文里的 [[..]] 先被替换成普通
+  // Markdown 链接(指向 #note:<id>),这样所有「能渲染 Markdown 的地方」都自然获得
+  // 可点击的双链(应用内预览、笔记分享页),不需要各自改渲染器;点击由下面的委托统一处理。
+  //
+  // 目标解析按标题(忽略大小写、去首尾空白),没有同名笔记就解析到文件夹:取该文件夹
+  // 下的第一篇笔记 —— 这样「[[项目记录]]」在还没建这篇笔记时也能点进文件夹看看。
+  // 反向链接面板枚举「哪些笔记的正文里出现了指向当前笔记的 [[标题]]」。
+  const LINK_RE = /\[\[([^\[\]]{1,200})\]\]/g;
+  function resolveLinkTarget(raw) {
+    const title = String(raw || '').split('|')[0].trim();
+    if (!title) return null;
+    const low = title.toLowerCase();
+    const byTitle = N.doc.notes.find((n) => String(n.title || '').trim().toLowerCase() === low);
+    if (byTitle) return { id: byTitle.id, title: byTitle.title || title };
+    const folder = N.doc.folders.find((f) => String(f.name || '').trim().toLowerCase() === low);
+    if (folder) {
+      const first = N.doc.notes.filter((n) => n.folderId === folder.id).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
+      if (first) return { id: first.id, title: first.title || title };
+    }
+    return null;
+  }
+  // 把 [[x]] 换成 [显示]( #note:<id> );找不到目标的保留原文(用户一眼能看出是坏链)
+  function wikilinkToMarkdown(text) {
+    return String(text || '').replace(LINK_RE, (m, inner) => {
+      const parts = String(inner).split('|');
+      const shown = (parts[1] || parts[0]).trim();
+      if (!shown) return m;
+      const target = resolveLinkTarget(parts[0]);
+      if (!target) return '`[[' + parts[0].trim() + ']]`';
+      return '[' + shown + '](' + '#note:' + encodeURIComponent(target.id) + ')';
+    });
+  }
+  // 反向链接:引用了当前笔记标题的其它笔记,以及从当前笔记指向别人的出链
+  function backlinksOf(note) {
+    const self = String(note.title || '').trim().toLowerCase();
+    const inbound = [];
+    const outbound = [];
+    const seenOut = {};
+    N.doc.notes.forEach((n) => {
+      if (!n || n.id === note.id) return;
+      const content = String(n.content || '');
+      let hit = false;
+      content.replace(LINK_RE, (m, inner) => {
+        const t = String(inner).split('|')[0].trim().toLowerCase();
+        if (self && t === self) hit = true;
+        return m;
+      });
+      if (hit) {
+        // 取片段时用小写正文找位置,回原正文取(原文大小写可能与标题不一致)
+        const idx = content.toLowerCase().indexOf('[[' + self);
+        inbound.push({ note: n, excerpt: idx >= 0 ? content.slice(Math.max(0, idx - 40), idx + 120).replace(/\s+/g, ' ') : '' });
+      }
+    });
+    String(note.content || '').replace(LINK_RE, (m, inner) => {
+      const label = String(inner).split('|')[0].trim();
+      if (!label || seenOut[label.toLowerCase()]) return m;
+      seenOut[label.toLowerCase()] = true;
+      const target = resolveLinkTarget(label);
+      outbound.push({ label, note: target ? noteById(target.id) : null });
+      return m;
+    });
+    return { inbound, outbound };
+  }
+  // 编辑器底部(预览区之后)的反向链接面板:有入链/出链才出现
+  function renderBacklinks(note) {
+    const pane = N.els.editorPane;
+    if (!pane || !note) return;
+    const old = pane.querySelector('.notes-backlinks');
+    if (old) old.remove();
+    const bl = backlinksOf(note);
+    if (!bl.inbound.length && !bl.outbound.length) return;
+    const box = document.createElement('div');
+    box.className = 'notes-backlinks';
+    const chip = (label, id, cls) => '<button type="button" class="nb-link' + (cls ? ' ' + cls : '') + '" data-note="' + esc(id) + '">' + esc(label) + '</button>';
+    box.innerHTML = '<div class="nb-head">反向链接 <span class="nb-count">' + bl.inbound.length + '</span></div>'
+      + (bl.inbound.length
+        ? '<div class="nb-list">' + bl.inbound.map((b) => '<div class="nb-item">'
+          + chip(b.note.title || '无标题', b.note.id) + '<span class="nb-excerpt">' + esc(b.excerpt) + '</span></div>').join('') + '</div>'
+        : '<div class="nb-none">还没有其它笔记引用这篇笔记。在其它笔记里写 [[' + esc(note.title || '标题') + ']] 即可建立双链。</div>')
+      + (bl.outbound.length
+        ? '<div class="nb-head nb-head-out">指向其它笔记 <span class="nb-count">' + bl.outbound.length + '</span></div>'
+          + '<div class="nb-list">' + bl.outbound.map((o) => (o.note
+            ? '<div class="nb-item">' + chip(o.note.title || o.label, o.note.id) + '</div>'
+            : '<div class="nb-item"><span class="nb-broken">[[' + esc(o.label) + ']] · 尚未创建</span></div>')).join('') + '</div>'
+        : '');
+    // 挂在编辑器卡片(.notes-editor)之内、正文区之后:挂在外面会与编辑器卡片并排,
+    // 被挤到屏幕外(看起来「面板没出现」)
+    const panes = pane.querySelector('.notes-editor-panes');
+    if (panes) panes.parentNode.insertBefore(box, panes.nextSibling);
+    else pane.appendChild(box);
+    box.querySelectorAll('.nb-link').forEach((b) => {
+      b.addEventListener('click', () => {
+        const id = b.dataset.note;
+        if (noteById(id)) openNote(id);
+      });
+    });
+  }
+  // 双链点击:渲染出来的链接是普通 <a href="#note:id">,在预览区(以及此后任何挂了
+  // 委托的容器里)统一拦截,避免浏览器把它当成页内锚点
+  function bindWikilinkClicks(root) {
+    if (!root || root._wlBound) return;
+    root._wlBound = true;
+    root.addEventListener('click', (e) => {
+      const a = e.target.closest('a[href^="#note:"]');
+      if (!a) return;
+      e.preventDefault();
+      const id = decodeURIComponent(String(a.getAttribute('href') || '').slice(6));
+      if (noteById(id)) openNote(id);
+      else toast('这篇笔记已被删除', true);
+    });
+  }
+
   function renderPreview(md) {
     const preview = N.editor && N.editor.preview;
     if (!preview) return;
-    // 附件走签名 URL 且需身份鉴权:属主本人由浏览器携带登录态即可取用
+    // 附件走签名 URL 且需身份鉴权:属主本人由浏览器携带登录态即可取用。
+    // 先做 [[双链]] → Markdown 链接的替换,再进渲染管线。
+    const src = wikilinkToMarkdown(md);
     if (window.OCRenderer && window.OCRenderer.renderInto) {
-      window.OCRenderer.renderInto(preview, md);
+      window.OCRenderer.renderInto(preview, src);
     } else {
-      preview.textContent = md;
+      preview.textContent = src;
     }
+    bindWikilinkClicks(preview);
+    const n = N.ui.selNoteId ? noteById(N.ui.selNoteId) : null;
+    if (n) renderBacklinks(n);
   }
 
   // 标题输入单独挂(input 委托,编辑器重建间不丢)

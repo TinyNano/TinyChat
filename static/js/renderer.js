@@ -955,6 +955,15 @@ R.render = function (text) {
   };
 
   /**
+   * 只生产 HTML 字符串,不挂载(给「有额外节点要拼进同一条正文」的调用方用:
+   * 先 render,自己 appendChild 附加节点,再 enhance 一次 —— 否则先 enhance 再拼节点,
+   * 拼进去的那部分永远拿不到代码块复制、公式、灯箱这些增强)。
+   */
+  R.renderHtml = function (text) {
+    return R.render(text || '');
+  };
+
+  /**
    * 渲染并挂载到容器（render + enhance 一步完成）
    * @param {HTMLElement} container
    * @param {string} text
@@ -1062,6 +1071,10 @@ R.render = function (text) {
       btn.dataset.bound = '1';
       btn.addEventListener('click', () => copyBlockText(btn, pre.textContent));
     });
+    // HTML / SVG 代码块:挂「预览」标签页(static/js/preview.js,在不出 allow-same-origin
+    // 的 iframe 里渲染)。先于其它增强执行:预览面板只是本块内部的兄弟节点,不改变
+    // 下面各处选择器的匹配结果。
+    if (window.OCPreview) window.OCPreview.enhance(container);
     container.querySelectorAll('.katex-display').forEach((block) => {
       if (!block.querySelector('.code-copy')) {
         const btn = copyButtonEl('复制到 Office');
