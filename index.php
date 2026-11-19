@@ -16,6 +16,7 @@ require_once __DIR__ . '/lib/updater.php';
 require_once __DIR__ . '/lib/search.php';
 require_once __DIR__ . '/lib/devices.php';
 require_once __DIR__ . '/lib/semantic.php';
+require_once __DIR__ . '/lib/insights.php';
 
 tc_send_cors();
 
@@ -201,10 +202,13 @@ function tc_dispatch($method, $path) {
         array('DELETE', '#^/api/me/devices$#', 'tc_api_me_devices_revoke_others'),
         array('DELETE', '#^/api/me/devices/([^/]+)$#', 'tc_api_me_device_revoke'),
         array('POST', '#^/api/me/devices/revoke-all$#', 'tc_api_me_devices_revoke_all'),
+        array('POST', '#^/api/me/devices/([^/]+)/trust$#', 'tc_api_me_device_trust'),
         array('GET', '#^/api/admin/invites$#', 'tc_api_admin_invites_list'),
         array('POST', '#^/api/admin/invites$#', 'tc_api_admin_invites_create'),
         array('DELETE', '#^/api/admin/invites/([^/]+)$#', 'tc_api_admin_invites_delete'),
         array('GET', '#^/api/admin/usage/export$#', 'tc_api_admin_usage_export'),
+        // 用量看板(按天 / 模型 / 用户聚合 + 额度概览)
+        array('GET', '#^/api/admin/insights$#', 'tc_api_admin_insights'),
         array('POST', '#^/api/auth/password$#', 'tc_api_change_password'),
         array('POST', '#^/api/auth/name$#', 'tc_api_change_name'),
         array('POST', '#^/api/auth/delete$#', 'tc_api_delete_own_account'),
@@ -221,6 +225,8 @@ function tc_dispatch($method, $path) {
         // 语义搜索(Embeddings):后台开启并指定供应商后可用
         array('GET', '#^/api/me/semantic$#', 'tc_api_me_semantic'),
         array('POST', '#^/api/me/semantic/index$#', 'tc_api_me_semantic_index'),
+        array('GET', '#^/api/me/semantic/stats$#', 'tc_api_me_semantic_stats'),
+        array('DELETE', '#^/api/me/semantic$#', 'tc_api_me_semantic_clear'),
         array('DELETE', '#^/api/chats/search/index$#', 'tc_api_chats_search_reindex'),
         array('GET', '#^/api/sync/chats$#', 'tc_api_sync_get_chats'),
         array('POST', '#^/api/sync/chats$#', 'tc_api_sync_save_chats'),

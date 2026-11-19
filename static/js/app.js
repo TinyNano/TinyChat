@@ -1231,7 +1231,7 @@ async function openChatSearchHit(h) {
   resetNoteMentions();
   state._scrollHistoryToBottom = true;
   if (chat._visibleCount != null) delete chat._visibleCount;
-  renderChatList(); renderMessages(); resetComposer(); updateAssistantChip();
+  renderChatList(); renderMessages(); resetComposer(); restoreComposerDraft(); updateAssistantChip();
 }
 
 function visibleChats() {
@@ -1260,11 +1260,21 @@ function renderChatList() {
     onSelect: (c) => {
       if (state.streaming) { stopStreaming(); }
       resetChatSearch();
+      // 归档的会话打开时先取消归档:归档是一件「不想再看到它」的事,
+      // 点开就等于反悔了,否则用户会在列表里找不到刚聊过的会话
+      if (c.archived) {
+        const live = liveChat(c);
+        if (live) { live.archived = false; live.archivedAt = 0; saveChats(); }
+      }
       state.currentChatId = c.id;
       resetNoteMentions();
       state._scrollHistoryToBottom = true;
       if (c._visibleCount != null) delete c._visibleCount;
-      renderChatList(); renderMessages(); resetComposer(); updateAssistantChip();
+      // 先离开旧会话(旧草稿落盘到旧会话上),再清输入框并恢复新会话的草稿。
+      // 顺序反过来时 resetComposer 会清掉「当前 会话」的草稿 —— 此时 currentChatId
+      // 若已指向新会话,新会话的草稿就被自己抹掉了。
+      resetComposer(); restoreComposerDraft();
+      renderChatList(); renderMessages(); updateAssistantChip();
     },
     onDelete: async (c) => {
       const ok = window.OCUI
@@ -1303,6 +1313,19 @@ function renderChatList() {
       toast(live.pinned ? '已置顶「' + (live.title || '新对话') + '」' : '已取消置顶');
     },
     onShare: (c) => shareConversation(c),
+    // 归档:只改标记,不删内容、不立墓碑。搜索(FTS 索引与语义索引)照旧覆盖它 ——
+    // 「收起来」与「消失」是两件事,删除那条路仍然只有「删除」菜单项。
+    onArchive: (c) => {
+      const live = liveChat(c);
+      if (!live) return;
+      const was = !!live.archived;
+      live.archived = !was;
+      live.archivedAt = was ? 0 : Date.now();
+      // 取消置顶:置顶的会话即使归档也会被排到最前,看起来像没归档
+      if (!was && live.pinned) live.pinned = false;
+      saveChats(); renderChatList();
+      toast(was ? '已取消归档「' + (live.title || '新对话') + '」' : '已归档「' + (live.title || '新对话') + '」，仍可在搜索里找到');
+    },
     onExport: (c) => {
       // 右键/「⋯」菜单里的「导出 Markdown」:与「设置 → 数据」的当前对话导出同一份 chatToMarkdown
       const msgs = (c.messages || []).filter((m) => m && String(m.content || '').trim() && !m.error);
@@ -1471,7 +1494,7 @@ function newChat(opts) {
   state.chats.unshift(chat);
   state.currentChatId = chat.id;
       resetNoteMentions();
-  saveChats(); renderChatList(); renderMessages(); renderEmptyState(); resetComposer();
+  saveChats(); renderChatList(); renderMessages(); renderEmptyState(); resetComposer({ dropDraft: true });
   updateAssistantChip();
   autosizeInput();
   Promise.resolve(applyPinnedModel()).catch(() => {});
@@ -1542,7 +1565,44 @@ function renderEmptyState() {
   empty.style.display = (state.currentChatId && currentChat() && currentChat().messages.length) ? 'none' : 'flex';
   updateAssistantChip();
 }
-function resetComposer() {
+// ---- 跨会话草稿 ----
+// 输入框内容与待发附件按会话记在 chat.draft 上:切走再切回来不丢,刷新后也还在
+// (会话本身随本地库/云端同步走)。附件只存文本大小以内的轻量副本 —— 图片 dataUrl
+// 可能有几 MB,草稿不该把本地存储撑爆,这类附件切走就丢(输入的文字仍然保留)。
+function saveComposerDraft() {
+  const chat = currentChat();
+  const input = $('input');
+  if (!chat || !input) return;
+  const text = String(input.value || '');
+  const atts = (state.pendingAttachments || []).filter((a) => !a || !a.dataUrl || String(a.dataUrl).length < 65536);
+  if (!text && !atts.length) { delete chat.draft; return; }
+  chat.draft = {
+    text: text,
+    attachments: atts.map((a) => ({ name: a.name, size: a.size, type: a.type, mediaType: a.mediaType, content: a.content, text: a.text, imageAsText: a.imageAsText })),
+    at: Date.now(),
+  };
+}
+function restoreComposerDraft() {
+  const chat = currentChat();
+  const input = $('input');
+  if (!chat || !input) return;
+  const d = chat.draft || null;
+  input.value = d && typeof d.text === 'string' ? d.text : '';
+  state.pendingAttachments = (d && Array.isArray(d.attachments)) ? d.attachments.slice() : [];
+  if (typeof autosizeInput === 'function') autosizeInput();
+  if (typeof renderAttachments === 'function') renderAttachments();
+  if (typeof updateSendBtn === 'function') updateSendBtn();
+}
+function clearComposerDraft(chat) {
+  const c = chat || currentChat();
+  if (c && c.draft) { delete c.draft; }
+}
+
+// 清空输入框。
+// $dropDraft=true 表示「连同草稿一起丢掉」—— 因为写下了内容而清空(发送成功、新建对话)才这样;
+// 仅仅「换到另一个会话」时只用 $dropDraft=false 清 UI,草稿留着,切回来还能接着写。
+function resetComposer(opts) {
+  const drop = !!(opts && opts.dropDraft);
   const input = $('input');
   if (input) {
     input.value = '';
@@ -1551,7 +1611,24 @@ function resetComposer() {
   state.pendingAttachments = [];
   if (typeof renderAttachments === 'function') renderAttachments();
   if (typeof updateSendBtn === 'function') updateSendBtn();
+  if (drop) clearComposerDraft();
 }
+// 自检用:给会话追加 n 轮问答并重绘。迷你轨道只在内容远超视口时出现,
+// 测试没法在无头窗口里「等出」这么长的真实会话,只能这样造数据。
+function appendRounds(chatId, n) {
+  const chat = (state.chats || []).find((c) => c.id === chatId);
+  if (!chat) return false;
+  chat.messages = chat.messages || [];
+  for (let i = 0; i < (n || 1); i++) {
+    const t = Date.now();
+    chat.messages.push({ role: 'user', content: '追问 ' + i + '：讲清楚一点', createdAt: t });
+    chat.messages.push({ role: 'assistant', content: '回答 ' + i + '：' + '内容 '.repeat(30), model: state.currentModel || 'm', createdAt: t });
+  }
+  chat._visibleCount = null;
+  if (state.currentChatId === chatId) renderMessages();
+  return true;
+}
+
 function renderMessages() {
   const chat = currentChat();
   const box = $('messages');
@@ -1596,6 +1673,8 @@ function renderMessages() {
     box.appendChild(buildMsgNode(msgs[i], chat, i));
   }
   renderChatToc();
+  // 重绘后先同步一次轨道/高亮位置:否则要等下一次滚动才出现,长会话看起来像「没有缩略图」
+  try { syncTocActive(); } catch (e) { /* 轨道只是导航辅助,失败不影响正文 */ }
   if (state._scrollHistoryToBottom) {
     state._scrollHistoryToBottom = false;
     scrollToBottom();
@@ -1679,10 +1758,19 @@ function renderChatToc() {
     tick.dataset.round = String(i);
     marks.appendChild(tick);
   });
+  // 悬停刻度显示「第 N 轮 + 问题摘要」:刻度只有 3px 宽,不提示等于让人瞎点
+  marks.querySelectorAll('.chat-toc-mark').forEach((tick) => {
+    const r = rounds[Number(tick.dataset.round)];
+    if (r) tick.title = '第 ' + (Number(tick.dataset.round) + 1) + ' 轮 · ' + tocPreview(r.user && r.user.content, 40);
+  });
   toc.appendChild(marks);
   const head = document.createElement('div');
   head.className = 'chat-toc-head';
   head.textContent = '本轮目录';
+  const track = document.createElement('div');
+  track.className = 'chat-toc-track';
+  track.setAttribute('aria-hidden', 'true');
+  toc.appendChild(track);
   toc.appendChild(head);
   rounds.forEach((r, i) => {
     const btn = document.createElement('button');
@@ -1749,6 +1837,25 @@ function syncTocActive() {
   toc.querySelectorAll('.chat-toc-item, .chat-toc-mark').forEach((el) => {
     el.classList.toggle('active', el.dataset.round === String(active));
   });
+  // 迷你轨道:整条高度里按「已读比例」画一段进度,长会话滚到哪一眼能看出来
+  syncTocTrack();
+}
+
+// 迷你刻度轨道(长会话导航的第二层):整段高度代表整场对话,当前视口位置画成一段。
+// 与上面的逐轮刻度配合 —— 刻度负责「跳到哪一轮」,轨道负责「现在在哪」。
+function syncTocTrack() {
+  const toc = $('chat-toc');
+  const area = $('chat-area');
+  const track = toc && toc.querySelector('.chat-toc-track');
+  if (!track || !area) return;
+  const total = area.scrollHeight || 1;
+  const view = Math.min(1, area.clientHeight / total);
+  const start = Math.max(0, Math.min(1, area.scrollTop / total));
+  track.style.setProperty('--toc-start', (start * 100).toFixed(2) + '%');
+  track.style.setProperty('--toc-len', (view * 100).toFixed(2) + '%');
+  track.classList.toggle('short', total <= area.clientHeight + 8);
+  // 只有真正「长」的会话才显示轨道:几十条消息的会话给一条迷你地图是噪音
+  toc.classList.toggle('has-track', total > area.clientHeight * 3);
 }
 function snapshotReplyVersion(msg) {
   if (!msg || msg.role !== 'assistant') return null;
@@ -2877,7 +2984,10 @@ function buildRequestBody(chatMessages, format, chat, extra) {
   const body = applyReasoningToBody({
     model: state.currentModel,
     stream: state.streamToggle,
-    messages: msgs.map((m) => chatApiMessage(m, format)),
+    // 群聊与单聊共用同一个组装函数(OCTools.chatBodyMessages):群聊历史里的
+    // role:'tool' 与 assistant.toolCalls 也要按工具协议回放,否则同一个模型
+    // 在单聊里能调工具、进群聊就报「tool 消息没有对应的调用」
+    messages: groupTurnApiMessages(msgs, format),
   }, format);
   if (state.currentProviderId) body.providerId = state.currentProviderId;
   const ready = attachWebSearchFlag(body);
@@ -2889,6 +2999,15 @@ function buildRequestBody(chatMessages, format, chat, extra) {
 }
 // chat 格式的单条消息:普通消息不变;带工具调用的 assistant 回传 tool_calls,
 // role:'tool' 原样回传 tool_call_id + 结果内容。
+// 群聊成员发言时,当前会话里的历史可能混着别的成员的工具调用:
+// 用 OCTools 的成对校验统一过一遍(去掉孤立的调用/结果),再按格式组装。
+function groupTurnApiMessages(msgs, format) {
+  if (!window.OCTools || typeof window.OCTools.chatBodyMessages !== 'function') {
+    return msgs.map((m) => chatApiMessage(m, format));
+  }
+  if (format !== 'chat') return msgs.map((m) => ({ role: m.role, content: toolFlattenedContent(m, format) }));
+  return window.OCTools.chatBodyMessages(msgs, 'chat', (m) => messageApiContent(m, 'chat'));
+}
 function chatApiMessage(m, format) {
   if (m && m.role === 'tool') {
     const api = window.OCTools ? window.OCTools.toApiMessage(m) : null;
@@ -3128,6 +3247,11 @@ async function sendMessage() {
   const input = $('input');
   let text = input.value.trim();
   const attachments = (state.pendingAttachments || []).slice();
+  // 发送即清草稿:留着的话切走再切回来会把刚发出去的文字又填回输入框
+  if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+  // 发送即丢弃这份草稿(内容已经进了消息列表)
+  clearComposerDraft(currentChat());
+  state.pendingAttachments = state.pendingAttachments || [];
   if (attachments.some((a) => a && a.parsing)) {
     toast('文档还在解析，请稍候', true);
     return;
@@ -4586,6 +4710,9 @@ async function refreshMe() {
       // 语义搜索(后台开启 embeddings 后可用):会话搜索里多一路「意思相近」的结果
       state.semanticEnabled = !!(data.semantic && data.semantic.enabled);
       if (window.OCNotes && window.OCNotes.setSemanticEnabled) window.OCNotes.setSemanticEnabled(state.semanticEnabled);
+      if (state.semanticEnabled && typeof window.OCRefreshSemanticStatus === 'function') {
+        try { window.OCRefreshSemanticStatus(); } catch (e) { /* 状态行不影响启动 */ }
+      }
       renderUser();
       loadAccountPackages();
       // 收藏亮星缓存 + 记忆配置(登录态下);菜单显隐随登录态刷新
@@ -5126,7 +5253,9 @@ function renderDevices(list, limit) {
     return;
   }
   box.innerHTML = list.map((d) => {
-    const title = escapeHtml(d.label || '未知设备') + (d.current ? ' <span class="badge">当前设备</span>' : '');
+    const title = escapeHtml(d.label || '未知设备')
+      + (d.current ? ' <span class="badge">当前设备</span>' : '')
+      + (d.trusted ? ' <span class="badge default" title="这台设备登录时不再发送新设备提醒">常用</span>' : '');
     const meta = [d.ip ? escapeHtml(d.ip) : '未知 IP', '登录于 ' + new Date(d.createdAt).toLocaleString('zh-CN'), fmtDeviceTime(d.lastActiveAt)]
       .filter(Boolean).join(' · ');
     return '<div class="row-between" data-device="' + escapeHtml(d.id) + '" style="padding:6px 0;border-bottom:1px solid var(--hairline)">'
@@ -5134,11 +5263,33 @@ function renderDevices(list, limit) {
       + '<div class="muted small" style="word-break:break-all">' + meta + '</div>'
       + (d.ua ? '<div class="muted small" style="opacity:.7;word-break:break-all">' + escapeHtml(d.ua) + '</div>' : '')
       + '</div>'
+      + '<span class="dev-actions">'
+      + '<button class="btn small" data-trust="' + escapeHtml(d.id) + '" data-on="' + (d.trusted ? '1' : '0') + '" type="button"'
+      + ' title="' + (d.trusted ? '取消后,这台设备下次登录会重新发提醒邮件' : '标为常用后,这台设备登录时不再发新设备提醒') + '">'
+      + (d.trusted ? '取消常用' : '设为常用') + '</button>'
       + '<button class="btn small' + (d.current ? '' : ' danger') + '" data-revoke="' + escapeHtml(d.id) + '" type="button">'
-      + (d.current ? '退出登录' : '退出该设备') + '</button></div>';
+      + (d.current ? '退出登录' : '退出该设备') + '</button></span></div>';
   }).join('');
   const note = $('acc-device-note');
   if (note) note.textContent = '最多保留最近 ' + (limit || 20) + ' 次登录记录';
+  // 常用设备:按浏览器指纹整台生效(见 lib/devices.php tc_api_me_device_trust)。
+  // 标为常用后,这台设备登录不再触发「新设备登录」提醒邮件。
+  box.querySelectorAll('[data-trust]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const on = btn.dataset.on !== '1';
+      btn.disabled = true;
+      try {
+        const r = await api('/api/me/devices/' + encodeURIComponent(btn.dataset.trust) + '/trust', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trusted: on }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return toast((d.error && d.error.message) || '操作失败', true);
+        toast(on ? '已设为常用设备，之后在这台设备登录不再发提醒' : '已取消常用设备');
+        loadDevices();
+      } catch (e) { toast('操作失败: ' + e.message, true); }
+      finally { btn.disabled = false; }
+    });
+  });
   box.querySelectorAll('[data-revoke]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const row = btn.closest('[data-device]');
@@ -5695,6 +5846,42 @@ async function saveToolSource(patch) {
     customIns.addEventListener('change', commitIns);
     customIns.addEventListener('blur', commitIns);
   }
+  // 语义索引状态:后台开了 embeddings 才显示;「清空重建」= 删掉本账号的向量文件,
+  // 下次搜索/问笔记时客户端会按当前配置的模型重新建(换模型后维数不同,旧向量本来也用不了)
+  (function initSemanticRow() {
+    const row = $('pref-semantic-row');
+    const clearBtn = $('pref-semantic-clear');
+    const desc = $('pref-semantic-desc');
+    const refresh = () => {
+      if (!state.semanticEnabled) { if (row) row.classList.add('hidden'); return; }
+      if (row) row.classList.remove('hidden');
+      api('/api/me/semantic/stats').then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || !desc) return;
+        const kinds = d.byKind || {};
+        const when = d.updatedAt ? new Date(d.updatedAt).toLocaleString('zh-CN') : '尚未建立';
+        desc.textContent = '已索引 ' + (d.items || 0) + ' 条（笔记 ' + (kinds.notes || 0) + ' · 会话 ' + (kinds.chats || 0) + '）'
+          + ' · 模型 ' + (d.model || '未指定') + ' · 更新于 ' + when;
+      }).catch(() => {});
+    };
+    if (clearBtn) clearBtn.addEventListener('click', async () => {
+      const ok = window.OCUI && OCUI.confirm
+        ? await OCUI.confirm({ title: '清空语义索引', message: '清空后下一次搜索或「问笔记」会按当前模型重新建立索引（会重新消耗 embeddings 调用）。', danger: true, confirmText: '清空' })
+        : confirm('确认清空语义索引？');
+      if (!ok) return;
+      try {
+        const r = await api('/api/me/semantic', { method: 'DELETE' });
+        if (!r.ok) throw new Error('清理失败');
+        state._semanticIndexed = false;
+        if (window.OCNotes && window.OCNotes.resetSemanticIndex) window.OCNotes.resetSemanticIndex();
+        toast('已清空，将在下次检索时重建');
+        refresh();
+      } catch (e) { toast(e.message || '清理失败', true); }
+    });
+    window.OCRefreshSemanticStatus = refresh;
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  })();
+
   // 记忆管理:打开记忆面板;开关切换时联动显隐
   const memManage = $('pref-memory-manage');
   if (memManage) memManage.addEventListener('click', () => { if (window.OCExtras) window.OCExtras.openMemoryPanel(); });
@@ -8549,7 +8736,53 @@ window.OCConversations.initShortcuts({
   onSend: () => sendMessage(),
   onShortcuts: () => { if (window.OCExtras) window.OCExtras.openShortcutsModal(); },
   onOpenSettings: () => openSettings(),
+  // 在列表里按顺序切换会话(第 1 个是最新的)。到两端就停在原处,不循环 ——
+  // 循环切换时「到底了没有」没有任何反馈,比停住更容易误操作。
+  onPrevChat: () => stepChat(-1),
+  onNextChat: () => stepChat(1),
+  onToggleApiChats: () => {
+    const sw = $('pref-show-api-chats');
+    if (!sw) return;
+    sw.checked = !sw.checked;
+    sw.dispatchEvent(new Event('change', { bubbles: true }));
+    if (typeof renderChatList === 'function') renderChatList();
+    toast(sw.checked ? '已显示 API 对话' : '已隐藏 API 对话');
+  },
 });
+// 分享页「复制到我的对话」留下的标记:启动时把它设为当前会话(见 share.html 的 importShare)。
+// 拉取云端列表之后调用,所以列表里一定有它;没有就说明同步还没跟上,只提示不报错。
+function openImportedChatIfAny() {
+  let id = '';
+  try { id = localStorage.getItem('oc_chat_imported') || ''; } catch (e) { return; }
+  if (!id) return;
+  try { localStorage.removeItem('oc_chat_imported'); } catch (e) { /* 忽略 */ }
+  if (!(state.chats || []).some((c) => c && c.id === id)) {
+    toast('导入的对话同步稍有延迟，稍后可在列表里找到', true);
+    return;
+  }
+  state.currentChatId = id;
+  renderChatList(); renderMessages(); resetComposer();
+  toast('已导入到你的对话列表');
+}
+
+// 按侧栏顺序在两个会话之间移动。归档的会话不参与(它们不在时间分组里,
+// 键盘切过去等于凭空打开一个看不见的条目)。
+function stepChat(delta) {
+  const list = visibleChats().filter((c) => c && !c.archived);
+  if (list.length < 2) return;
+  const sorted = [...list].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.updatedAt || 0) - (a.updatedAt || 0));
+  const cur = sorted.findIndex((c) => c.id === state.currentChatId);
+  const next = cur < 0 ? 0 : Math.min(sorted.length - 1, Math.max(0, cur + delta));
+  const target = sorted[next];
+  if (!target || target.id === state.currentChatId) return;
+  if (state.streaming) stopStreaming();
+  saveComposerDraft();
+  state.currentChatId = target.id;
+  resetNoteMentions();
+  state._scrollHistoryToBottom = true;
+  resetComposer(); restoreComposerDraft();
+  renderChatList(); renderMessages(); updateAssistantChip();
+}
 // ============ 侧边栏折叠 ============
 function setSidebarCollapsed(collapsed) {
   const sidebar = $('sidebar');
@@ -8808,10 +9041,21 @@ function applyComposerPlaceholder() {
   if (mq.addEventListener) mq.addEventListener('change', onChange);
   else mq.addListener(onChange);
 })();
+// 草稿节流落盘:打字时每次 input 都写一遍会话数组太重(整份会话会重新序列化)
+let draftTimer = null;
+function scheduleDraftSave() {
+  if (draftTimer) clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    draftTimer = null;
+    saveComposerDraft();
+    saveChats();
+  }, 600);
+}
 inputEl.addEventListener('input', () => {
   autosizeInput();
   updateSendBtn();
   syncMentionFromInput();
+  scheduleDraftSave();
   if (window.OCExtras) window.OCExtras.onInputChanged();
 });
 function updateSendBtn() {
@@ -9927,12 +10171,15 @@ function bootDone(mode) {
       }
     }
     loadChats();
+    // 刷新后恢复当前会话的草稿(输入框里刚写一半的内容不因一次刷新消失)
+    try { restoreComposerDraft(); } catch (e) { /* 草稿恢复失败不影响启动 */ }
     renderChatList();
     state._scrollHistoryToBottom = true;
     renderMessages();
     renderEmptyState();
     // 云同步:登录后先拉取云端聊天记录并合并(await 保证完成,避免后续盲推覆盖云端)
     await pullChatsFromCloud();
+    openImportedChatIfAny();
     try { await loadProviders(); } catch (e) { toast('供应商加载失败，已保留登录状态，请稍后重试', true); }
     await loadDefaultAssistant();
     if (ensureDefaultAssistantOnBlank()) {
@@ -10420,6 +10667,9 @@ async function aiComplete(messages, opts = {}) {
 
 window.OCApp = {
   state,
+  // 自检入口:把内部动作暴露出来(tests/v220-gui.mjs 用来验证切换/长会话语义;
+  // 无头浏览器里修饰键事件与首屏高度都不稳定,只按界面结果断言会得到假阴性)
+  _debug: { stepChat, appendRounds },
   api,
   toast,
   // 启动完成信号:await OCApp.ready 等价于等 documentElement 的 data-boot="done"。

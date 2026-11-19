@@ -302,6 +302,8 @@ async function loadStorage() {
   if (d.backups.count > 0) cl.push(['backups', '数据备份（' + d.backups.count + ' 个文件）', fmtBytesBig(d.backups.bytes) + ' 可释放']);
   if (byKey.logs && byKey.logs.bytes > 0) cl.push(['logs', '运行日志（' + d.logs.count + ' 条）', fmtBytesBig(byKey.logs.bytes) + ' 可释放']);
   if (byKey.update && byKey.update.bytes > 0) cl.push(['updates', '更新残留（' + (byKey.update.files || 0) + ' 个文件）', fmtBytesBig(byKey.update.bytes) + ' 可释放']);
+  // 语义索引不是纯缓存:里面有笔记与会话摘要的向量,删号不会自动清 —— 必须在这里能清掉
+  if (byKey.vectors && byKey.vectors.bytes > 0) cl.push(['vectors', '语义索引（' + (byKey.vectors.files || 0) + ' 个用户）', fmtBytesBig(byKey.vectors.bytes) + ' 可释放']);
   if ($('st-clean')) $('st-clean').innerHTML = cl.length ? cl.map((x) =>
     '<div class="st-row"><div class="st-row-main"><div class="st-row-name">' + escapeHtml(x[1]) + '</div>'
     + '<div class="st-row-desc">' + escapeHtml(x[2]) + '</div></div>'
@@ -604,6 +606,90 @@ async function purgeDeletedChats(payload, confirmMsg) {
     }
   });
 })();
+
+// 区间切换:只重拉看板,不动其它统计
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('#ins-range button');
+  if (b) loadInsights(Number(b.dataset.days));
+});
+
+// 用量看板:按天 / 模型 / 用户的消耗聚合 + 额度概览。
+// 数据来自 /api/admin/insights(见 lib/insights.php),与 loadStats 的「调用次数」口径互补 ——
+// 调用次数看不出钱花在谁身上、花在哪个模型上,这里补的就是那一层。
+let INS_DAYS = 7;
+async function loadInsights(days) {
+  INS_DAYS = [7, 14, 30].includes(Number(days)) ? Number(days) : INS_DAYS;
+  document.querySelectorAll('#ins-range button').forEach((b) => b.classList.toggle('active', Number(b.dataset.days) === INS_DAYS));
+  let d = {};
+  try {
+    const r = await api('/api/admin/insights?days=' + INS_DAYS);
+    d = await r.json();
+    if (!r.ok) throw new Error((d.error && d.error.message) || '加载失败');
+  } catch (e) {
+    const g = $('ins-summary');
+    if (g) g.innerHTML = '<p class="muted small">看板加载失败：' + escapeHtml(e.message || '') + '</p>';
+    return;
+  }
+  const usage = d.usage || {};
+  const total = usage.total || {};
+  const quota = d.quota || {};
+  const sum = $('ins-summary');
+  if (sum) {
+    const cell = (label, value, sub) => '<div class="stat-cell"><div class="stat-label">' + label + '</div>'
+      + '<div class="stat-value">' + value + '</div>' + (sub ? '<div class="muted small">' + sub + '</div>' : '') + '</div>';
+    sum.innerHTML = cell('区间消耗', Number(total.cost || 0).toFixed(2), '额度（' + INS_DAYS + ' 天）')
+      + cell('调用次数', (total.calls || 0).toLocaleString('zh-CN'), '含辅助调用')
+      + cell('Token', ((Number(total.prompt || 0) + Number(total.completion || 0)) || 0).toLocaleString('zh-CN'), '输入 ' + (total.prompt || 0) + ' · 输出 ' + (total.completion || 0))
+      + cell('已发 / 剩余额度', Number(quota.issued || 0).toFixed(0) + ' / ' + Number(quota.remaining || 0).toFixed(0),
+        quota.unlimitedUsers ? ('另有 ' + quota.unlimitedUsers + ' 个不限额度账号') : '按可追溯流水累计');
+  }
+  const chart = $('ins-chart');
+  if (chart) {
+    const series = usage.series || [];
+    const max = Math.max(1, ...series.map((x) => Number(x.cost) || 0));
+    const anyCost = series.some((x) => Number(x.cost) > 0);
+    chart.innerHTML = series.length ? series.map((x) => {
+      const c = Number(x.cost) || 0;
+      const h = Math.max(c > 0 ? 8 : 3, Math.round((c / max) * 100));
+      const today = x.day === new Date().toISOString().slice(0, 10);
+      return '<div class="trend-col' + (c > 0 ? ' has' : '') + (today ? ' today' : '') + '">'
+        + '<div class="trend-bar" style="height:' + h + 'px"' + (c > 0 ? ' data-n="' + c.toFixed(2) + '"' : '') + '>'
+        + '<span class="trend-val">' + (c > 0 ? c.toFixed(2) : '') + '</span></div>'
+        + '<div class="trend-label">' + String(x.day).slice(5) + '</div></div>';
+    }).join('') : '';
+    if (!anyCost && series.length) chart.innerHTML += '<div class="trend-empty">区间内没有计费消耗</div>';
+  }
+  const modelsEl = $('ins-models');
+  if (modelsEl) {
+    const rows = usage.models || [];
+    const maxC = Math.max(1, ...rows.map((m) => Number(m.cost) || 0), ...rows.map((m) => Number(m.calls) || 0));
+    modelsEl.innerHTML = rows.length ? rows.map((m) => {
+      const cost = Number(m.cost) || 0;
+      const w = Math.max(2, Math.round((Math.max(cost, Number(m.calls) || 0) / maxC) * 100));
+      return '<div class="ins-bar-row"><span class="ins-bar-name" title="' + escapeHtml(m.model) + '">' + escapeHtml(m.model) + '</span>'
+        + '<span class="ins-bar-track"><span class="ins-bar-fill" style="width:' + w + '%"></span></span>'
+        + '<span class="ins-bar-val">' + (m.calls || 0) + ' 次 · ' + cost.toFixed(2) + '</span></div>';
+    }).join('') : '<p class="muted small">区间内没有模型消耗</p>';
+  }
+  const usersEl = $('ins-users');
+  if (usersEl) {
+    const rows = (usage.users || []).slice(0, 12);
+    usersEl.innerHTML = rows.length ? rows.map((u, i) => '<div class="mini-user"><span class="mu-rank">' + (i + 1) + '</span>'
+      + '<span class="mu-name">' + escapeHtml(u.name || '用户') + '</span>'
+      + '<span class="mu-quota">' + (u.calls || 0) + ' 次 · ' + Number(u.cost || 0).toFixed(2) + '</span></div>').join('')
+      : '<p class="muted small">区间内没有用量</p>';
+  }
+  const lowEl = $('ins-low');
+  const lowTitle = $('ins-low-title');
+  if (lowEl) {
+    const rows = quota.lowUsers || [];
+    if (lowTitle) lowTitle.textContent = '额度快用完的账号' + (quota.warnBelow ? '（剩余 ≤ ' + quota.warnBelow + '）' : '（未设置预警阈值）');
+    lowEl.innerHTML = rows.length ? rows.map((u) => '<div class="mini-user"><span class="mu-rank">!</span>'
+      + '<span class="mu-name">' + escapeHtml(u.name || '用户') + '</span>'
+      + '<span class="mu-quota">剩 ' + u.quota + '</span></div>').join('')
+      : '<p class="muted small">' + (quota.warnBelow ? '没有账号低于预警阈值' : '去「用户 → 验证设置」里设置「额度预警阈值」后，这里会列出需要充值的账号') + '</p>';
+  }
+}
 
 async function loadStats() {
   const r = await api('/api/admin/stats');
@@ -5095,7 +5181,7 @@ const TAB_LOADERS = {
   toolbox: loadToolboxSettings,
   'ext-overview': () => loadExtOverview(),
   overview: () => { loadStats(); loadSystemBoard(); },
-  usage: () => loadStats(),
+  usage: () => { loadStats(); loadInsights(INS_DAYS); },
   users: () => loadUsers(),
   groups: () => loadGroups(),
   access: async () => {

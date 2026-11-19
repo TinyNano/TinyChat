@@ -9,16 +9,16 @@
 <meta name="robots" content="noindex,nofollow">
 <link rel="icon" type="image/svg+xml" href="./logo-icon.svg">
 <link rel="apple-touch-icon" href="./static/logo/app-icon-192.png">
-<link rel="stylesheet" href="./static/css/style.min.css?v=2.2.0">
-<link rel="stylesheet" href="./vendor/highlight/github.min.css?v=2.2.0" id="hljs-theme">
-<link rel="stylesheet" href="./vendor/katex/katex.min.css?v=2.2.0">
-<link rel="stylesheet" href="./static/css/enhanced.min.css?v=2.2.0">
-<link rel="stylesheet" href="./static/css/refine.min.css?v=2.2.0">
-<link rel="stylesheet" href="./static/css/redesign.min.css?v=2.2.0">
-<link rel="stylesheet" href="./static/css/polish.min.css?v=2.2.0">
-<link rel="stylesheet" href="./static/css/markdown.min.css?v=2.2.0">
-<link rel="stylesheet" href="./static/css/chrome.min.css?v=2.2.0">
-<script src="./static/js/theme-boot.min.js?v=2.2.0"></script>
+<link rel="stylesheet" href="./static/css/style.min.css?v=2.2.1">
+<link rel="stylesheet" href="./vendor/highlight/github.min.css?v=2.2.1" id="hljs-theme">
+<link rel="stylesheet" href="./vendor/katex/katex.min.css?v=2.2.1">
+<link rel="stylesheet" href="./static/css/enhanced.min.css?v=2.2.1">
+<link rel="stylesheet" href="./static/css/refine.min.css?v=2.2.1">
+<link rel="stylesheet" href="./static/css/redesign.min.css?v=2.2.1">
+<link rel="stylesheet" href="./static/css/polish.min.css?v=2.2.1">
+<link rel="stylesheet" href="./static/css/markdown.min.css?v=2.2.1">
+<link rel="stylesheet" href="./static/css/chrome.min.css?v=2.2.1">
+<script src="./static/js/theme-boot.min.js?v=2.2.1"></script>
 </head>
 <body class="admin-body">
 <form id="admin-fields" autocomplete="off" style="display:contents">
@@ -90,6 +90,18 @@
   <div class="admin-panel" id="panel-usage">
     <div class="admin-card">
       <div class="admin-panel-head"><div><h2>用量分析</h2><p class="muted small">近 14 天调用趋势、用户用量、模型评价与额度排行。</p></div><button class="btn small" id="usage-export" type="button">导出明细 CSV</button></div>
+      <div class="admin-panel-head" style="margin-bottom:8px"><div></div>
+        <div class="ins-range" id="ins-range">
+          <button class="btn small active" data-days="7" type="button">7 天</button>
+          <button class="btn small" data-days="14" type="button">14 天</button>
+          <button class="btn small" data-days="30" type="button">30 天</button>
+        </div>
+      </div>
+      <div class="admin-grid" id="ins-summary"></div>
+      <div class="section-title">消耗趋势（按额度）</div><div class="trend-chart" id="ins-chart"></div>
+      <div class="section-title">模型消耗 Top</div><div class="ins-bars" id="ins-models"></div>
+      <div class="section-title">按用户消耗</div><div class="mini-users admin-long-list" id="ins-users"></div>
+      <div class="section-title" id="ins-low-title">额度快用完的账号</div><div class="mini-users admin-long-list" id="ins-low"></div>
       <div class="section-title">近 14 天调用趋势</div><div class="trend-chart" id="trend-chart"></div>
       <div class="meta-row" id="meta-row"></div>
       <div class="section-title">近 14 天用量</div><div class="usage-ledger admin-long-list" id="usage-ledger"></div>
@@ -1356,17 +1368,17 @@
   </div>
 </div>
 </form>
-<script defer src="./static/js/config.min.js?v=2.2.0"></script>
-<script defer src="./static/js/icons.min.js?v=2.2.0"></script>
-<script defer src="./vendor/markdown-it/markdown-it.min.js?v=2.2.0"></script>
-<script defer src="./vendor/markdown-it/markdown-it-footnote.min.js?v=2.2.0"></script>
-<script defer src="./vendor/markdown-it/markdown-it-emoji.min.js?v=2.2.0"></script>
-<script defer src="./vendor/dompurify/purify.min.js?v=2.2.0"></script>
-<script defer src="./vendor/katex/katex.min.js?v=2.2.0"></script>
-<script defer src="./vendor/highlight/highlight.min.js?v=2.2.0"></script>
-<script defer src="./static/js/ui.min.js?v=2.2.0"></script>
-<script defer src="./static/js/components.min.js?v=2.2.0"></script>
-<script defer src="./static/js/renderer.min.js?v=2.2.0"></script>
-<script defer src="./static/js/admin.min.js?v=2.2.0"></script>
+<script defer src="./static/js/config.min.js?v=2.2.1"></script>
+<script defer src="./static/js/icons.min.js?v=2.2.1"></script>
+<script defer src="./vendor/markdown-it/markdown-it.min.js?v=2.2.1"></script>
+<script defer src="./vendor/markdown-it/markdown-it-footnote.min.js?v=2.2.1"></script>
+<script defer src="./vendor/markdown-it/markdown-it-emoji.min.js?v=2.2.1"></script>
+<script defer src="./vendor/dompurify/purify.min.js?v=2.2.1"></script>
+<script defer src="./vendor/katex/katex.min.js?v=2.2.1"></script>
+<script defer src="./vendor/highlight/highlight.min.js?v=2.2.1"></script>
+<script defer src="./static/js/ui.min.js?v=2.2.1"></script>
+<script defer src="./static/js/components.min.js?v=2.2.1"></script>
+<script defer src="./static/js/renderer.min.js?v=2.2.1"></script>
+<script defer src="./static/js/admin.min.js?v=2.2.1"></script>
 </body>
 </html>

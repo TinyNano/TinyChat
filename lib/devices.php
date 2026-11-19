@@ -46,15 +46,27 @@ function tc_device_ua() {
 }
 
 // 登记一次登录。返回 sid(写进令牌)。
+// 「可信设备」按浏览器指纹继承:同一台机器换会话(退出再登录)依然是可信的,
+// 用户只需对每台机器点过一次「这是常用设备」。设备指纹沿用新设备提醒邮件那套 UA 哈希。
 function tc_device_register(&$user, $sid = '') {
     if ($sid === '') $sid = tc_uid(16);
     $now = tc_now();
     $list = (isset($user['sessions']) && is_array($user['sessions'])) ? $user['sessions'] : array();
+    $fp = tc_login_fingerprint();
+    $trusted = false;
+    if ($fp !== '') {
+        foreach ($list as $row) {
+            if (!is_array($row) || empty($row['trusted'])) continue;
+            if ((string) (isset($row['fp']) ? $row['fp'] : '') === $fp) { $trusted = true; break; }
+        }
+    }
     $list[$sid] = array(
         'time' => $now,
         'last' => $now,
         'ip' => tc_client_ip(),
         'ua' => tc_device_ua(),
+        'fp' => $fp,
+        'trusted' => $trusted,
     );
     // 超出上限时丢掉最久未活跃的(语义:只保留最近 20 次登录,老设备需要重新登录)
     if (count($list) > TC_SESSIONS_MAX) {
@@ -105,10 +117,25 @@ function tc_devices_public($user, $payload) {
             'createdAt' => (int) (isset($row['time']) ? $row['time'] : 0),
             'lastActiveAt' => (int) (isset($row['last']) ? $row['last'] : 0),
             'current' => $cur !== '' && $cur === (string) $sid,
+            'trusted' => !empty($row['trusted']),
         );
     }
     usort($out, function ($a, $b) { return $b['lastActiveAt'] - $a['lastActiveAt']; });
     return $out;
+}
+
+// 这次登录来自可信设备吗:令牌里的 sid 在名单上且标为 trusted。
+// 老令牌没有 sid 时退回按 UA 指纹找(升级前登录的设备不会被当成新设备再提醒一次)。
+function tc_device_is_trusted($user, $payload) {
+    $list = (isset($user['sessions']) && is_array($user['sessions'])) ? $user['sessions'] : array();
+    $sid = isset($payload['sid']) ? (string) $payload['sid'] : '';
+    if ($sid !== '' && isset($list[$sid]) && is_array($list[$sid])) return !empty($list[$sid]['trusted']);
+    $fp = tc_login_fingerprint();
+    if ($fp === '') return false;
+    foreach ($list as $row) {
+        if (is_array($row) && !empty($row['trusted']) && (string) (isset($row['fp']) ? $row['fp'] : '') === $fp) return true;
+    }
+    return false;
 }
 
 // ============ 接口 ============
@@ -147,6 +174,36 @@ function tc_api_me_device_revoke($sid) {
         tc_log_auth_event('auth', $user['name'], '退出设备登录', $user['id']);
     });
     tc_json(200, array('ok' => true, 'current' => $isCurrent));
+}
+
+// POST /api/me/devices/{sid}/trust  {trusted: true|false}
+// 把某台设备(按浏览器指纹,覆盖该指纹下的所有会话)标为常用设备 / 取消。
+// 标可信后这份指纹上的新登录不再发「新设备登录」提醒邮件。
+function tc_api_me_device_trust($sid) {
+    $sid = substr(trim((string) $sid), 0, 64);
+    if ($sid === '') tc_fail(400, '缺少设备标识');
+    $b = tc_read_json_body(8192);
+    $on = !empty($b['trusted']);
+    $fp = '';
+    tc_with_db(true, function (&$db) use ($sid, $on, &$fp) {
+        $user = tc_require_auth($db);
+        foreach ($db['users'] as &$u) {
+            if ((string) $u['id'] !== (string) $user['id']) continue;
+            if (!isset($u['sessions'][$sid]) || !is_array($u['sessions'][$sid])) tc_fail(404, '该设备已下线');
+            $fp = (string) (isset($u['sessions'][$sid]['fp']) ? $u['sessions'][$sid]['fp'] : '');
+            // 指纹相同 = 同一台机器:整台机器一起改,免得「这台可信、那台不可信」
+            foreach ($u['sessions'] as $k => $row) {
+                if (!is_array($row)) continue;
+                if ((string) $k === $sid || ($fp !== '' && (string) (isset($row['fp']) ? $row['fp'] : '') === $fp)) {
+                    $u['sessions'][$k]['trusted'] = $on;
+                }
+            }
+            break;
+        }
+        unset($u);
+        tc_log_auth_event('auth', $user['name'], $on ? '标记常用设备' : '取消常用设备', $user['id']);
+    });
+    tc_json(200, array('ok' => true, 'trusted' => $on));
 }
 
 // DELETE /api/me/devices:退出除本机外的所有设备(保留当前 sid,当前会话不受影响)

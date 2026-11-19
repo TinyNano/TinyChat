@@ -207,5 +207,49 @@
     container.appendChild(box);
   };
 
+  // ---- 群聊 / 在线聊天复用 ----
+  // 群聊(groupui.js)与在线聊天(im.js)各有一套请求体组装:历史是纯文本、不认识工具协议。
+  // 把这里的三个纯函数导出,它们就能用同一套规则把工具调用与结果回放成请求体 ——
+  // 否则「同一个模型在单聊里能调工具、进群聊就不行」,而这种不一致最难被发现。
+  // sanitize(list, contentOf):只保留成对的调用与结果,返回按原顺序排列的消息数组。
+  T.chatBodyMessages = function (list, format, contentOf) {
+    const out = [];
+    (list || []).forEach((m) => {
+      if (!m || typeof m !== 'object') return;
+      if (m.role !== 'assistant' && m.role !== 'user' && m.role !== 'tool') return;
+      if (m.role === 'tool') {
+        const row = T.toApiMessage(m);
+        if (row) out.push(row);
+        return;
+      }
+      const content = typeof contentOf === 'function' ? contentOf(m) : m.content;
+      const withCalls = T.toApiMessage(m, content);
+      out.push(withCalls || { role: m.role, content: content });
+    });
+    return T.pairCalls(out);
+  };
+
+  // 成对校验:去掉没有结果的调用、没有调用的结果(上游遇到孤立的一方会 400)。
+  T.pairCalls = function (list) {
+    const results = {};
+    list.forEach((m) => { if (m && m.role === 'tool' && m.tool_call_id) results[m.tool_call_id] = true; });
+    const calls = {};
+    list.forEach((m) => {
+      if (!m || m.role !== 'assistant' || !Array.isArray(m.tool_calls)) return;
+      m.tool_calls.forEach((c) => { if (c && c.id) calls[c.id] = true; });
+    });
+    return list.filter((m) => {
+      if (!m) return false;
+      if (m.role === 'tool') return !!calls[m.tool_call_id];
+      if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+        m.tool_calls = m.tool_calls.filter((c) => c && results[c.id]);
+        if (!m.tool_calls.length) { delete m.tool_calls; return true; }
+        // 带工具调用的 assistant 在没有正文时,content 必须是 null 而不是 ''(严格的上游会拒空串)
+        if (m.content === '') m.content = null;
+      }
+      return true;
+    });
+  };
+
   window.OCTools = T;
 })();

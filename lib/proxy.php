@@ -691,7 +691,15 @@ function tc_curl_failure($ch, $errno, $err, $status, $url, $connectSec, $timeout
     );
     $kind = 'other';
     $code = 502;
+    $dnsHints = '/Could not resolve|resolve host|Name or service not known|getaddrinfo|nodename nor servname|unknown host/i';
     if ($errno === $errResolveHost || $errno === $errResolveProxy) {
+        $kind = 'dns';
+    } elseif ($errno === 0 && (int) $status === 502 && $err === '') {
+        // 经过本机代理(Clash 之类)时,「域名不存在」不会变成 RESOLVE_HOST:
+        // 代理自己回一个空的 502,curl 认为请求成功。标题与正文都空 = 不可能是真实上游的应答,
+        // 按域名解析失败提示;否则用户只会看到「HTTP 502」,不知道该去查拼写还是查网络。
+        $kind = 'dns';
+    } elseif ($errno === $errConnect && preg_match($dnsHints, (string) $err)) {
         $kind = 'dns';
     } elseif ($errno === $errConnect) {
         $kind = 'connect';
@@ -820,6 +828,11 @@ function tc_http_request($url, $method, $headers, $body, $timeoutMs, $stream = f
         $err = curl_error($ch);
         $errno = curl_errno($ch);
         $fail = $ok === false ? tc_curl_failure($ch, $errno, $err, $status, $url, $connSec, 0) : null;
+        // 代理回的空 502(见 tc_curl_failure 里「网关 502」那条)在流式与非流式各是一半概率,
+        // 两处都得转成连接失败,否则同一故障在流式会话里仍然是笼统的 502
+        if ($fail === null && $status === 502 && $errBody === '') {
+            $fail = tc_curl_failure($ch, 0, '', $status, $url, $connSec, 0);
+        }
         curl_close($ch);
         if ($fail !== null) return $fail;
         return array('ok' => true, 'status' => $status, 'body' => $errBody, 'ctype' => '');
@@ -830,6 +843,9 @@ function tc_http_request($url, $method, $headers, $body, $timeoutMs, $stream = f
     $err = curl_error($ch);
     $errno = curl_errno($ch);
     $fail = $raw === false ? tc_curl_failure($ch, $errno, $err, $status, $url, $connSec, $curlSec) : null;
+    if ($fail === null && $status === 502 && (string) $raw === '') {
+        $fail = tc_curl_failure($ch, 0, '', $status, $url, $connSec, $curlSec);
+    }
     curl_close($ch);
     if ($fail !== null) return $fail;
     return array('ok' => true, 'status' => $status, 'body' => $raw, 'ctype' => $ctype);

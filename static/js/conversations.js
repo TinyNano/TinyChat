@@ -69,6 +69,12 @@
       { value: 'share', label: '分享对话', sub: '生成公开链接' },
       { value: 'branch', label: '创建分支', sub: '复制全部消息' },
       { value: 'export', label: '导出 Markdown', sub: '保存为 .md 文件' },
+      // 归档 = 从时间分组里收起来,但内容不进墓碑、搜索照旧能搜到。
+      // 之前只有「删除」一条清理手段,而删除会同步到所有设备且服务端只留 300 条 ——
+      // 想「先收起来以后再说」的用户没有出路。
+      c.archived
+        ? { value: 'unarchive', label: '取消归档', sub: '放回时间分组' }
+        : { value: 'archive', label: '归档', sub: '从列表收起，仍可搜索' },
       { value: 'del', label: '删除', sub: '不可恢复' },
     ];
     if (!window.OC || !window.OC.openSelect) return;
@@ -80,6 +86,8 @@
         else if (value === 'share' && opts.onShare) opts.onShare(c);
         else if (value === 'branch' && opts.onBranch) opts.onBranch(c);
         else if (value === 'export' && opts.onExport) opts.onExport(c);
+        else if (value === 'archive' && opts.onArchive) opts.onArchive(c);
+        else if (value === 'unarchive' && opts.onArchive) opts.onArchive(c);
         else if (value === 'del' && opts.onDelete) opts.onDelete(c);
       },
     });
@@ -279,32 +287,40 @@
       ['今天', '昨天', '本周', '更早'].forEach((base) => { GROUP_ORDER.push(base, base + API_SUFFIX); });
       const p2 = (n) => String(n).padStart(2, '0');
       const isApiOpt = typeof opts.isApiChat === 'function' ? opts.isApiChat : null;
+      // 「已归档」单列一组:不按时间再拆,也不与 API 组混排;位置固定在所有时间分组之后,
+      // 默认收起。搜索态(下方命中列表)不隐藏归档,否则「搜得到却看不到」。
+      const ARCHIVE_GROUP = '已归档';
       const groups = {};
       filtered.forEach((c) => {
+        if (c.archived) { (groups[ARCHIVE_GROUP] = groups[ARCHIVE_GROUP] || []).push(c); return; }
         const base = timeGroupOf(c.updatedAt || c.createdAt);
         const g = (isApiOpt && isApiOpt(c)) ? base + API_SUFFIX : base;
         (groups[g] = groups[g] || []).push(c);
       });
+      GROUP_ORDER.push(ARCHIVE_GROUP);
       GROUP_ORDER.forEach((g) => {
         const list = groups[g] || [];
         if (!list.length) return;
-        const isApi = g.slice(-API_SUFFIX.length) === API_SUFFIX;
-        const baseGroup = isApi ? g.slice(0, -API_SUFFIX.length) : g;
+        const isArchived = g === ARCHIVE_GROUP;
+        const isApi = !isArchived && g.slice(-API_SUFFIX.length) === API_SUFFIX;
+        const baseGroup = isArchived ? ARCHIVE_GROUP : (isApi ? g.slice(0, -API_SUFFIX.length) : g);
+        // 归档组默认收起(有内容时);其余按「今天展开、更早收起」的既有规则
+        const defaultCollapsed = isArchived ? true : (baseGroup !== '今天');
         // 分组折叠:今天默认展开,昨天及更早默认折叠(状态记忆在 localStorage)。
         // 「今天 API」按「今天」的默认展开(折叠状态仍各记各的,收起一个不影响另一个)。
         const COLLAPSE_KEY = 'oc_chat_group_collapsed';
         let collapsedMap = {};
         try { collapsedMap = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '{}'); } catch (e) { collapsedMap = {}; }
-        const isCollapsed = collapsedMap[g] !== undefined ? collapsedMap[g] : (baseGroup !== '今天');
+        const isCollapsed = collapsedMap[g] !== undefined ? collapsedMap[g] : defaultCollapsed;
         const section = document.createElement('div');
         section.className = 'chat-group-section' + (isCollapsed ? ' collapsed' : '');
         const title = document.createElement('div');
-        title.className = 'chat-group' + (baseGroup === '今天' ? ' is-today' : '') + (isApi ? ' is-api' : '');
+        title.className = 'chat-group' + (baseGroup === '今天' ? ' is-today' : '') + (isApi ? ' is-api' : '') + (isArchived ? ' is-archive' : '');
         title.setAttribute('role', 'button');
         title.setAttribute('tabindex', '0');
         title.setAttribute('aria-expanded', String(!isCollapsed));
         // 「展开今天 API 对话」比「展开今天 API对话」好读,Latin 后缀前后各留一个空格
-        const tipName = isApi ? baseGroup + ' API 对话' : g + '对话';
+        const tipName = isArchived ? '已归档对话' : (isApi ? baseGroup + ' API 对话' : g + '对话');
         title.setAttribute('data-tip', (isCollapsed ? '展开' : '收起') + tipName);
         title.innerHTML = '<span class="chat-group-chev">' + ic('chevronDown', 11) + '</span>'
           + '<span class="chat-group-label">' + g + '</span>'
@@ -438,6 +454,21 @@
       } else if (mod && k === ',' && !inInput) {
         e.preventDefault();
         if (handlers.onOpenSettings) handlers.onOpenSettings();
+      } else if (mod && (e.code === 'BracketLeft' || k === '[' || k === '{')) {
+        // 上一个会话(Shift+[)。按物理键位判定:Shift 下 e.key 在多数键盘是 '{',
+        // 中文输入法/不同布局下还可能变成 '｛' 或 '“',只比 key 会在这些环境静默失效。
+        // 这里比的是「裸字母键」的 key,所以在输入框里而没按 Shift 时不应触发。
+        if (!e.shiftKey && inInput) return;
+        e.preventDefault();
+        if (handlers.onPrevChat) handlers.onPrevChat();
+      } else if (mod && (e.code === 'BracketRight' || k === ']' || k === '}')) {
+        if (!e.shiftKey && inInput) return;
+        e.preventDefault();
+        if (handlers.onNextChat) handlers.onNextChat();
+      } else if (mod && e.shiftKey && k === 'a' && !inInput) {
+        // 切换「显示 API 对话」:API 会话一多就糊住侧栏,给一个不必进设置的开关
+        e.preventDefault();
+        if (handlers.onToggleApiChats) handlers.onToggleApiChats();
       }
     });
   };

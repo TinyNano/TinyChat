@@ -15,18 +15,18 @@
 <meta name="twitter:card" content="summary">
 <link rel="icon" type="image/svg+xml" href="./logo-icon.svg">
 <link rel="apple-touch-icon" href="./logo-icon.svg">
-<link rel="stylesheet" href="/static/css/style.min.css?v=2.2.0">
-<link rel="stylesheet" href="/vendor/highlight/github.min.css?v=2.2.0" id="hljs-theme">
-<link rel="stylesheet" href="/vendor/katex/katex.min.css?v=2.2.0">
-<link rel="stylesheet" href="/static/css/enhanced.min.css?v=2.2.0">
-<link rel="stylesheet" href="/static/css/refine.min.css?v=2.2.0">
-<link rel="stylesheet" href="/static/css/redesign.min.css?v=2.2.0">
-<link rel="stylesheet" href="/static/css/polish.min.css?v=2.2.0">
-<link rel="stylesheet" href="/static/css/markdown.min.css?v=2.2.0">
-<link rel="stylesheet" href="/static/css/chrome.min.css?v=2.2.0">
-<script src="/static/js/theme-boot.min.js?v=2.2.0"></script>
+<link rel="stylesheet" href="/static/css/style.min.css?v=2.2.1">
+<link rel="stylesheet" href="/vendor/highlight/github.min.css?v=2.2.1" id="hljs-theme">
+<link rel="stylesheet" href="/vendor/katex/katex.min.css?v=2.2.1">
+<link rel="stylesheet" href="/static/css/enhanced.min.css?v=2.2.1">
+<link rel="stylesheet" href="/static/css/refine.min.css?v=2.2.1">
+<link rel="stylesheet" href="/static/css/redesign.min.css?v=2.2.1">
+<link rel="stylesheet" href="/static/css/polish.min.css?v=2.2.1">
+<link rel="stylesheet" href="/static/css/markdown.min.css?v=2.2.1">
+<link rel="stylesheet" href="/static/css/chrome.min.css?v=2.2.1">
+<script src="/static/js/theme-boot.min.js?v=2.2.1"></script>
 <!-- 性能门控:按后台设置决定是否加载渲染依赖(markdown-it 始终加载;KaTeX/highlight 可关) -->
-<script src="/static/js/perf.min.js?v=2.2.0"></script>
+<script src="/static/js/perf.min.js?v=2.2.1"></script>
 </head>
 <body class="share-page">
   <header class="share-top">
@@ -39,11 +39,11 @@
   <main class="share-main" id="share-root">
     <p class="muted">正在加载分享…</p>
   </main>
-  <script defer src="/static/js/config.min.js?v=2.2.0"></script>
-  <script defer src="/static/js/icons.min.js?v=2.2.0"></script>
-  <script defer src="/static/js/renderer.min.js?v=2.2.0"></script>
-  <script defer src="/static/js/preview.min.js?v=2.2.0"></script>
-  <script defer src="/static/js/office-formula-copy.min.js?v=2.2.0"></script>
+  <script defer src="/static/js/config.min.js?v=2.2.1"></script>
+  <script defer src="/static/js/icons.min.js?v=2.2.1"></script>
+  <script defer src="/static/js/renderer.min.js?v=2.2.1"></script>
+  <script defer src="/static/js/preview.min.js?v=2.2.1"></script>
+  <script defer src="/static/js/office-formula-copy.min.js?v=2.2.1"></script>
   <script>
     (function () {
       const LOGO = '<img src="/logo.svg" class="brand-logo-light avatar-logo-img" alt="">'
@@ -102,7 +102,12 @@
           }
           root.innerHTML = '<h1 class="share-title">' + escapeHtml(share.title || '未命名对话') + '</h1>'
             + '<p class="share-meta">公开快照 · ' + escapeHtml(fmtTime(share.updatedAt || share.createdAt)) + ' · ' + msgs.length + ' 条消息</p>'
+            // 只读快照的自然延伸:把这段对话导入自己的账号继续聊。
+            // 未登录时点了会先去登录(带回跳),登录后自动接上这一步。
+            + '<div class="share-import"><button type="button" class="btn small primary" id="share-import-btn">复制到我的对话，继续聊</button>'
+            + '<span class="muted small" id="share-import-note">会新建一条对话，原分享不受影响</span></div>'
             + '<div class="messages" id="share-msgs"></div>';
+          bindImport(share, msgs);
           const box = document.getElementById('share-msgs');
           msgs.forEach((m) => {
             const role = m.role === 'user' ? 'user' : 'assistant';
@@ -121,6 +126,79 @@
         }))
         .catch((e) => showError('无法打开分享', e.message || '分享不存在或已失效'));
       }
+      // ---- 复制到我的对话 ----
+      // 只建一条普通对话(带来源标记),不写分享、不改别人的数据。导入后跳到首页并打开它,
+      // 之后的一切都属于当前账号(选中会话即被当作当前会话,不需要服务端再改状态)。
+      function sharesApi(path, opts) {
+        return fetch((window.apiUrl ? window.apiUrl(path) : path), opts);
+      }
+      async function importShare(share, msgs) {
+        const token = localStorage.getItem('oc_token') || '';
+        if (!token) return false;
+        const title = String(share.title || '未命名对话');
+        const chat = {
+          id: 'si' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+          title: (title.length > 40 ? title.slice(0, 40) + '…' : title) + '（来自分享）',
+          messages: (msgs || []).map((m) => ({ role: m.role === 'user' ? 'user' : 'assistant', content: String(m.content || ''), createdAt: Date.now() })),
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          importedFrom: location.pathname,
+        };
+        // 服务端保存是「整份列表替换」(带乐观并发):必须先把云端现有会话取下来,
+        // 把新会话并进去再推回。只推一条会把云端其余会话删掉。
+        const cur = await fetch(window.apiUrl ? window.apiUrl('/api/sync/chats') : '/api/sync/chats', {
+          headers: { Authorization: 'Bearer ' + token },
+        }).then((x) => (x.ok ? x.json() : null)).catch(() => null);
+        if (!cur || !Array.isArray(cur.chats)) return false;
+        const list = cur.chats.filter((c) => c && c.id !== chat.id).concat([chat]);
+        const r = await fetch(window.apiUrl ? window.apiUrl('/api/sync/chats') : '/api/sync/chats', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+          body: JSON.stringify({ baseRevision: Number(cur.revision) || 0, chats: list }),
+        });
+        if (r.ok) { localStorage.setItem('oc_chat_imported', chat.id); return true; }
+        if (r.status === 409) {
+          // 期间云端有别的设备写过:再把最新列表取一次,合并后重试一次。仍失败就交给用户重试,
+          // 不在这里循环 —— 多设备同时操作时无限重试只会一直失败。
+          const again = await r.json().catch(() => null);
+          const latest = again && Array.isArray(again.chats) ? again.chats : null;
+          if (!latest) return false;
+          const merged = latest.filter((c) => c && c.id !== chat.id).concat([chat]);
+          const r2 = await fetch(window.apiUrl ? window.apiUrl('/api/sync/chats') : '/api/sync/chats', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+            body: JSON.stringify({ baseRevision: Number(again.revision) || 0, chats: merged }),
+          });
+          if (r2.ok) { localStorage.setItem('oc_chat_imported', chat.id); return true; }
+        }
+        return false;
+      }
+      function bindImport(share, msgs) {
+        const btn = document.getElementById('share-import-btn');
+        const note = document.getElementById('share-import-note');
+        if (!btn) return;
+        const hasToken = !!(localStorage.getItem('oc_token') || '');
+        if (!hasToken && note) note.textContent = '登录或注册后即可导入';
+        btn.addEventListener('click', async () => {
+          if (!localStorage.getItem('oc_token')) {
+            location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+            return;
+          }
+          btn.disabled = true;
+          const old = btn.textContent;
+          btn.textContent = '正在导入…';
+          const ok = await importShare(share, msgs).catch(() => false);
+          if (ok) {
+            btn.textContent = '已导入，正在打开…';
+            location.href = '/';
+          } else {
+            btn.disabled = false;
+            btn.textContent = old;
+            if (note) note.textContent = '导入失败：请确认已登录后重试';
+          }
+        });
+      }
+
       if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
       else start();
     })();

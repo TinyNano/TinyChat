@@ -96,6 +96,32 @@ check('渲染时先替换双链再进渲染管线', /const src = wikilinkToMarkd
 check('反向链接面板', /function renderBacklinks/.test(notes));
 check('双链点击不跳出笔记界面', /a\[href\^="#note:"\]/.test(notes));
 
+// ---------- 7) v2.2.1:归档 / 工具一致性 / 看板 / 索引运维 / 常用设备 ----------
+check('归档标记进同步白名单', /'archived' => !empty\(\$c\['archived'\]\)/.test(api));
+check('归档会话单独成组且默认收起', /ARCHIVE_GROUP/.test(conv) && /isArchived \? true : \(baseGroup !== '今天'\)/.test(conv));
+check('打开归档会话时自动取消归档', /if \(c\.archived\) \{/.test(app));
+const toolsJs = read('static/js/tools.js');
+check('工具消息组装导出给群聊复用', /T\.chatBodyMessages\s*=/.test(toolsJs) && /groupTurnApiMessages/.test(app));
+check('群聊请求走成对校验的组装', /messages: groupTurnApiMessages\(msgs, format\)/.test(app));
+check('Artifacts 与代码块预览共用 sandbox 规则', /OCPreview\.sandboxFor\(allowScripts\)/.test(read('static/js/multimodal.js')));
+check('Artifacts 面板默认不跑脚本', /artifactFrameHtml\(type, artifact\.content \|\| '', false\)/.test(read('static/js/multimodal.js')));
+const insights = read('lib/insights.php');
+check('用量看板按天/模型/用户三路聚合', /function tc_insights_usage/.test(insights) && /function tc_insights_quota/.test(insights));
+check('看板注册路由', /tc_api_admin_insights/.test(read('index.php')));
+check('演示管理员在看板里被匿名化', /isDemo/.test(insights) && insights.indexOf("'demo-'") > 0, '用户维度不能给演示身份真实 id');
+check('向量索引计入存储分类并可清理', /'key' => 'vectors'/.test(api) && /\$target === 'vectors'/.test(api));
+check('语义索引有状态与清空接口', /tc_api_me_semantic_stats/.test(read('index.php')) && /tc_api_me_semantic_clear/.test(read('index.php')));
+const devSrc2 = read('lib/devices.php');
+check('常用设备按浏览器指纹继承', /tc_device_register[\s\S]*?\$trusted = true/.test(dev));
+check('常用设备跳过新设备提醒', /\$isTrustedFp/.test(api));
+check('常用设备接口注册', /tc_api_me_device_trust/.test(read('index.php')));
+check('迷你轨道随滚动同步', /function syncTocTrack/.test(app) && /has-track/.test(app));
+check('草稿按会话保存与恢复', /function saveComposerDraft/.test(app) && /function restoreComposerDraft/.test(app));
+check('发送时清掉草稿', /clearComposerDraft\(currentChat\(\)\)/.test(app));
+check('新增快捷键已接线', /onPrevChat/.test(app) && /onToggleApiChats/.test(app) && /Shift \+ \[/.test(read('static/js/extras.js')));
+check('分享页可导入到我的对话', /复制到我的对话/.test(read('share.html')) && /openImportedChatIfAny/.test(app));
+check('分享导入合并而非覆盖云端列表', /baseRevision: Number\(cur\.revision\)/.test(read('share.html')));
+
 console.log('');
 console.log(fail ? '结果: ' + fail + ' 条不通过' : '结果: 全部通过');
 process.exit(fail ? 1 : 0);

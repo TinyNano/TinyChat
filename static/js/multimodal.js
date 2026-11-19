@@ -332,6 +332,26 @@
    * 打开 Artifacts 面板（类 Claude Canvas）
    * @param {{type:'html'|'code'|'svg'|'text', title, content}} artifact
    */
+  // 与 preview.js 同一套隔离:优先复用 OCPreview 的文档壳与 sandbox 规则;那份实现没加载
+  // 时退回本文件内等价的保守逻辑(永远不透明源,只是少了跟随主题的背景色)。
+  function artifactFrameHtml(type, content, allowScripts) {
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const doc = window.OCPreview
+      ? window.OCPreview.buildDoc(type === 'svg' ? 'svg' : 'html', content, dark)
+      : (type === 'svg'
+        ? '<!doctype html><meta charset="utf-8"><style>html,body{margin:0;padding:12px;height:100%;display:flex;align-items:center;justify-content:center}svg{max-width:100%;height:auto}</style>' + content
+        : content);
+    const sandbox = window.OCPreview
+      ? window.OCPreview.sandboxFor(allowScripts)
+      : ('allow-forms allow-modals' + (allowScripts ? ' allow-scripts' : ''));
+    return '<div class="artifact-frame-wrap"><iframe class="artifact-frame" sandbox="' + sandbox + '"'
+      + ' referrerpolicy="no-referrer" title="Artifact 预览" srcdoc="' + escapeAttr(doc) + '"></iframe></div>';
+  }
+  function artifactScriptToggle() {
+    return '<label class="artifact-scripts" title="在沙箱内运行代码里的脚本（仍然读不到本站任何数据）">'
+      + '<input type="checkbox"> 运行脚本</label>';
+  }
+
   function openArtifact(artifact) {
     let panel = document.querySelector('.artifact-panel');
     if (!panel) {
@@ -348,11 +368,11 @@
       // 于是它成了唯一绕过消毒的注入点。放进 sandbox 的 iframe 后,脚本拿不到同源上下文,
       // 也碰不到父页面。不给 allow-same-origin,避免内容读写父页的存储与 DOM。
       // 注意整个文档都要按属性转义(srcdoc 是属性值),否则内层的引号会截断属性。
-      const doc = type === 'svg'
-        ? '<!doctype html><meta charset="utf-8"><style>html,body{margin:0;height:100%;display:flex;align-items:center;justify-content:center}svg{max-width:100%;max-height:100%}</style>'
-          + (artifact.content || '')
-        : (artifact.content || '');
-      body = '<iframe class="artifact-frame" sandbox="allow-scripts" srcdoc="' + escapeAttr(doc) + '"></iframe>';
+      //
+      // 文档壳与 sandbox 规则统一交给 preview.js:代码块内预览、Artifacts 面板两处必须是
+      // 同一套隔离与同一个「运行脚本」开关,否则同一段 HTML 在一处能跑脚本、另一处不能。
+      // 保持单个子节点:勾选开关时代码按 .artifact-frame-wrap 直接替换
+      body = '<div class="artifact-visual">' + artifactFrameHtml(type, artifact.content || '', false) + artifactScriptToggle() + '</div>';
     } else if (type === 'code') {
       body = '<pre class="artifact-code">' + escapeHtml(artifact.content || '') + '</pre>';
     } else {
@@ -367,6 +387,20 @@
     panel.classList.add('show');
 
     panel.querySelector('[data-close]').addEventListener('click', () => panel.classList.remove('show'));
+    // 「运行脚本」开关:与块内预览对齐 —— 默认不跑脚本,勾选后才把 allow-scripts 加进
+    // sandbox(仍然没有 allow-same-origin,文档始终是不透明源)
+    // 「运行脚本」开关:与块内预览对齐 —— 默认不跑脚本,勾选后才把 allow-scripts 加进
+    // sandbox(仍然没有 allow-same-origin,文档始终是不透明源)。用事件委托:勾选后
+    // 重建 iframe 时整块 outerHTML 会换掉,直接绑在旧节点上的监听会一起丢。
+    panel.addEventListener('change', (e) => {
+      const box = e.target.closest('.artifact-scripts input');
+      if (!box) return;
+      const wrap = panel.querySelector('.artifact-frame-wrap');
+      if (!wrap) return;
+      const holder = document.createElement('div');
+      holder.innerHTML = artifactFrameHtml(type, artifact.content || '', !!box.checked);
+      wrap.replaceWith(holder.firstChild);
+    });
     panel.querySelector('[data-copy]').addEventListener('click', async () => {
       const text = artifact.content || '';
       try { await navigator.clipboard.writeText(text); if (window.toast) window.toast('已复制'); }

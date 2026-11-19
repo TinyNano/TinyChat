@@ -310,8 +310,19 @@
   color: var(--text-secondary);
 }
 .chat-search-scope-note { color: var(--text-tertiary); }
-.chat-search-hit { align-items: flex-start; }
-.chat-hit-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+/* 搜索结果行:标题与片段上下排,左对齐(基类是横排的会话行) */
+.chat-item.chat-search-hit {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  height: auto;
+  min-height: 34px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.chat-hit-main { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; width: 100%; }
+.chat-hit-main .chat-title { width: 100%; }
 .chat-hit-snippet {
   font-size: 0.821rem;
   line-height: 1.45;
@@ -354,6 +365,11 @@
   padding: 0;
   font-weight: 500;
 }
+/* 「已归档」分组:与时间分组同样淡,但加一道上边距把它和「更早」隔开 ——
+   它是一条「收起线」,不是又一个时间段 */
+.chat-group.is-archive { margin-top: 6px; }
+/* 登录设备每行的操作按钮:常用 / 退出并排,窄屏自动折行 */
+.dev-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 
 /* 会话行:左右内缩由 .chat-item 自己给,wrap 不再额外加内边距。
    以前 wrap 有 6px 内缩、而同一列的「今天/昨天」分组标题没有,
@@ -2305,6 +2321,12 @@ body.chat-resizing * { cursor: col-resize !important; }
   color: var(--text-tertiary);
   font-size: 0.929rem;
 }
+/* 分享页「复制到我的对话」:只读快照的自然出口 —— 导入到自己的账号继续聊 */
+.share-import {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 18px;
+}
+.share-import .muted { color: var(--text-tertiary); }
 .share-empty,
 .share-error {
   padding: 80px 24px;

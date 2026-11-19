@@ -94,6 +94,18 @@ page.on('pageerror', (e) => pageErrors.push(String((e && e.message) || e)));
 const now = Date.now();
 page.on('console', (m) => { if (m.type() === 'error') console.log('  [console] ' + m.text().slice(0, 200)); });
 await page.addInitScript(([token, uid, stamp]) => {
+  // 自检探针(捕获阶段):按下按键后当前会话有没有被任何处理器切走。
+  // 不能只看冒泡阶段的 defaultPrevented —— 其它处理器(如输入框自身)会先接管,
+  // 那时「键被接住了」并不代表「会话切了」。
+  window.__chatAtKey = null;
+  document.addEventListener('keydown', (e) => {
+    if (!window.OCApp || !e.ctrlKey) return;
+    if (e.code !== 'BracketLeft' && e.code !== 'BracketRight') return;
+    window.__chatAtKey = window.OCApp.state.currentChatId;
+    setTimeout(() => {
+      window.__chatAtKey = { from: window.__chatAtKey, to: window.OCApp.state.currentChatId };
+    }, 0);
+  }, true);
   localStorage.setItem('oc_token', token);
   // 页面引用的是 .min.js(发版产物):本地没跑过 tools/release.mjs 时那些还是旧版本,
   // 这里把资源地址改成源码路径,保证测的是「现在这份代码」而不是上一次的发版包
@@ -113,6 +125,16 @@ await page.addInitScript(([token, uid, stamp]) => {
   })();
   localStorage.setItem('oc_boot_no_min', '1');
   localStorage.setItem('oc_chats_' + uid, JSON.stringify([
+    {
+      id: 'arch1', title: '已归档的旧对话', createdAt: stamp - 86400000, updatedAt: stamp - 86400000,
+      archived: true, archivedAt: stamp,
+      messages: [{ role: 'user', content: '很久以前的问题', createdAt: stamp }, { role: 'assistant', content: '很久以前的回答', model: 'm', createdAt: stamp }],
+    },
+    {
+      id: 'draft1', title: '草稿会话', createdAt: stamp, updatedAt: stamp,
+      draft: { text: '这是没发出去的草稿', attachments: [] },
+      messages: [{ role: 'user', content: '草稿那一轮的提问', createdAt: stamp }, { role: 'assistant', content: '草稿那一轮的回答', model: 'm', createdAt: stamp }],
+    },
     {
       id: 'pv1', title: '代码块预览自检', createdAt: stamp, updatedAt: stamp,
       messages: [
@@ -152,6 +174,12 @@ console.log('  [debug] ' + JSON.stringify(await page.evaluate(() => ({
   chatCount: (window.OCApp && window.OCApp.state && window.OCApp.state.chats || []).length,
 }))));
 console.log('== 1. HTML / SVG 代码块预览 ==');
+// 打开测试用的主会话(默认当前会话取决于列表顺序,这里显式指定,避免被归档/草稿几条带跑)
+await page.evaluate(() => {
+  const c = (window.OCApp.state.chats || []).find((x) => x.id === 'pv1');
+  if (c && window.OCApp.openChatById) window.OCApp.openChatById('pv1');
+});
+await sleep(900);
 const blocks = await page.$$('.msg.assistant .code-block');
 check('两段可预览代码块都挂了预览按钮', (await page.$$('.code-prev-toggle')).length >= 2, 'got=' + (await page.$$('.code-prev-toggle')).length);
 await page.click('.msg.assistant .code-prev-toggle');
@@ -310,6 +338,133 @@ if (opened) {
   }
   await page.evaluate(() => { if (window.OCNotes && window.OCNotes.close) window.OCNotes.close(); });
 }
+
+console.log('== 5. 会话归档 ==');
+const archGroup = await page.evaluate(() => {
+  const g = Array.from(document.querySelectorAll('.chat-group')).find((x) => x.innerText.indexOf('已归档') >= 0);
+  if (!g) return null;
+  const section = g.closest('.chat-group-section');
+  return { text: g.innerText, collapsed: section.classList.contains('collapsed'), hasArchiveClass: g.classList.contains('is-archive') };
+});
+check('侧栏出现「已归档」分组', !!archGroup, JSON.stringify(archGroup));
+check('归档分组默认收起', archGroup && archGroup.collapsed);
+check('归档分组有独立样式类', archGroup && archGroup.hasArchiveClass);
+check('归档会话不在时间分组里', await page.evaluate(() => {
+  const items = Array.from(document.querySelectorAll('.chat-item')).filter((x) => x.innerText.indexOf('已归档的旧对话') >= 0);
+  if (!items.length) return true;   // 收起时根本不在 DOM 上
+  return !!items[0].closest('.chat-group-section').querySelector('.is-archive');
+}));
+// 展开归档组 → 打开那条会话 → 归档标记被清掉(点开即反悔)
+await page.evaluate(() => {
+  const g = Array.from(document.querySelectorAll('.chat-group')).find((x) => x.innerText.indexOf('已归档') >= 0);
+  if (g) g.click();
+});
+await sleep(300);
+await page.evaluate(() => {
+  const it = Array.from(document.querySelectorAll('.chat-item')).find((x) => x.innerText.indexOf('已归档的旧对话') >= 0);
+  if (it) it.click();
+});
+await sleep(700);
+check('打开归档会话后自动取消归档', await page.evaluate(() => {
+  const c = (window.OCApp.state.chats || []).find((x) => x.id === 'arch1');
+  return !!c && !c.archived;
+}));
+
+console.log('== 6. 跨会话草稿 ==');
+await page.evaluate(() => {
+  const it = Array.from(document.querySelectorAll('.chat-item')).find((x) => x.innerText.indexOf('草稿会话') >= 0);
+  if (it) it.click();
+});
+await sleep(600);
+await sleep(400);
+check('切到草稿会话后输入框恢复内容', (await page.inputValue('#input')) === '这是没发出去的草稿', 'got=' + JSON.stringify(await page.inputValue('#input')));
+// 切走再切回:输入的改动被记住
+await page.fill('#input', '改了之后的草稿');
+await sleep(800);
+await page.evaluate(() => {
+  const it = Array.from(document.querySelectorAll('.chat-item')).find((x) => x.innerText.indexOf('代码块预览自检') >= 0);
+  if (it) it.click();
+});
+await sleep(600);
+check('切到别的会话时输入框是空的', (await page.inputValue('#input')) === '', await page.inputValue('#input'));
+await page.evaluate(() => {
+  const it = Array.from(document.querySelectorAll('.chat-item')).find((x) => x.innerText.indexOf('草稿会话') >= 0);
+  if (it) it.click();
+});
+await sleep(600);
+check('切回来草稿还在(含新改动)', (await page.inputValue('#input')) === '改了之后的草稿', await page.inputValue('#input'));
+
+console.log('== 7. 快捷键:会话切换 ==');
+// 快捷键的动作本体是 stepChat(按侧栏顺序切上下一条)。这里验证动作语义,
+// 再单独确认按键确实接进了处理器 —— 无头环境里 Playwright 的修饰键时序不稳,
+// 只按「按键后会话变了吗」断言会得到假阴性。
+await page.evaluate(() => {
+  const ids = (window.OCApp.state.chats || []).filter((c) => !c.archived)
+    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.updatedAt || 0) - (a.updatedAt || 0)).map((c) => c.id);
+  if (ids[0] && window.OCApp.openChatById) window.OCApp.openChatById(ids[0]);
+});
+await sleep(600);
+const before = await page.evaluate(() => window.OCApp.state.currentChatId);
+await page.evaluate(() => window.OCApp._debug.stepChat(1));
+await sleep(400);
+const afterNext = await page.evaluate(() => window.OCApp.state.currentChatId);
+await page.evaluate(() => window.OCApp._debug.stepChat(-1));
+await sleep(400);
+const afterPrev = await page.evaluate(() => window.OCApp.state.currentChatId);
+check('stepChat(1) 切到下一条会话', afterNext !== before, before + ' -> ' + afterNext);
+check('stepChat(-1) 切回上一条会话', afterPrev === before, afterNext + ' -> ' + afterPrev);
+// 按键接线:Ctrl+Shift+[ 必须真的切会话。
+// 注意只能派发 DOM 键事件:Playwright 的 keyboard.press 走原生注入,组合键会被浏览器
+// 当成真正的前进/后退导航,页面直接换掉,测出来的「切了」其实是换页。
+const keys = await page.evaluate(() => {
+  const id = () => window.OCApp.state.currentChatId;
+  const list = (window.OCApp.state.chats || []).filter((c) => !c.archived)
+    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.updatedAt || 0) - (a.updatedAt || 0)).map((c) => c.id);
+  // 从列表末尾起步,往上切才有上一条(stepChat 到顶/到底就停,这是有意的防越界)
+  window.OCApp.openChatById(list[list.length - 1]);
+  const fire = (key, code) => document.body.dispatchEvent(new KeyboardEvent('keydown', {
+    key, code, ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+  }));
+  window.__chatAtKey = null;
+  const start = id();
+  fire('{', 'BracketLeft');
+  return { start, list };
+});
+// 两个事件同步连发时 openChat 的渲染会把 id 读回到同一条,所以连续方向用动作本体
+// (上面的 stepChat)验证,这里只按「单次按键确实切走」判定接线。
+const keyed = await page.evaluate(() => window.__chatAtKey);
+check('Ctrl+Shift+[ 按一次就切到上一条会话', !!keyed && keyed.from === keys.start && keyed.to !== keyed.from, JSON.stringify({ keys, keyed }));
+check('快捷键速查列出了新组合', await page.evaluate(async () => {
+  const t = await (await fetch('/static/js/extras.js')).text();
+  return t.indexOf('切换到上一个会话') > 0 && t.indexOf('显示 / 隐藏 API 对话') > 0;
+}));
+
+console.log('== 8. 长会话迷你轨道 ==');
+await page.evaluate(() => {
+  // 追加 40 轮,让内容高度远超视口(轨道只在长会话出现);重绘由 appendRounds 自己触发
+  if (window.OCApp.state.currentChatId !== 'pv1') {
+    window.OCApp.openChatById ? window.OCApp.openChatById('pv1') : (window.OCApp.state.currentChatId = 'pv1');
+  }
+  window.OCApp._debug.appendRounds('pv1', 40);
+});
+await sleep(1500);
+const tocInfo = await page.evaluate(() => {
+  const toc = document.getElementById('chat-toc');
+  const track = toc && toc.querySelector('.chat-toc-track');
+  const area = document.getElementById('chat-area');
+  return {
+    exists: !!track,
+    hasTrack: toc ? toc.classList.contains('has-track') : false,
+    start: track ? track.style.getPropertyValue('--toc-start') : '',
+    scrollable: area ? area.scrollHeight > area.clientHeight * 3 : false,
+  };
+});
+check('长会话出现迷你轨道', tocInfo.exists && tocInfo.hasTrack, JSON.stringify(tocInfo));
+check('轨道按滚动位置设置起点', !!tocInfo.start, tocInfo.start);
+await page.evaluate(() => { const a = document.getElementById('chat-area'); a.scrollTop = a.scrollHeight / 2; a.dispatchEvent(new Event('scroll')); });
+await sleep(400);
+const mid = await page.evaluate(() => { const t = document.querySelector('.chat-toc-track'); return t ? t.style.getPropertyValue('--toc-start') : ''; });
+check('滚动后轨道起点随之前移', mid !== tocInfo.start && parseFloat(mid) > 0, tocInfo.start + ' -> ' + mid);
 
 await browser.close();
 console.log('');

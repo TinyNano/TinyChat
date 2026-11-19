@@ -223,6 +223,46 @@ function tc_semantic_public($db) {
 
 // ============ 接口 ============
 
+// GET /api/me/semantic/stats:当前账号的索引状态(条目数 / 占用 / 最近更新)。
+// 设置页据此显示「已索引 N 条 / 上次更新」,并提供「清空重建」——
+// 之前索引只增不减,用户改了模型(维数不同)或怀疑索引脏了,没有任何出口。
+function tc_api_me_semantic_stats() {
+    tc_with_db(false, function ($db) {
+        $user = tc_require_auth($db);
+        $cfg = tc_semantic_settings($db);
+        $file = tc_vec_file($user['id']);
+        $items = $cfg['enabled'] ? tc_vec_load($user['id']) : array();
+        $byKind = array('notes' => 0, 'chats' => 0);
+        $last = 0;
+        foreach ($items as $it) {
+            if (!is_array($it)) continue;
+            $k = isset($it['kind']) && $it['kind'] === 'chats' ? 'chats' : 'notes';
+            $byKind[$k]++;
+            $t = (int) (isset($it['t']) ? $it['t'] : 0);
+            if ($t > $last) $last = $t;
+        }
+        tc_json(200, array(
+            'enabled' => (bool) $cfg['enabled'],
+            'model' => $cfg['model'],
+            'items' => count($items),
+            'byKind' => $byKind,
+            'bytes' => is_file($file) ? (int) @filesize($file) : 0,
+            'updatedAt' => $last,
+        ));
+    });
+}
+
+// DELETE /api/me/semantic:清空本账号的语义索引(下次检索前客户端会按需重建)
+function tc_api_me_semantic_clear() {
+    tc_with_db(false, function ($db) {
+        $user = tc_require_auth($db);
+        $file = tc_vec_file($user['id']);
+        $freed = is_file($file) ? (int) @filesize($file) : 0;
+        if (is_file($file)) @unlink($file);
+        tc_json(200, array('ok' => true, 'freedBytes' => $freed));
+    });
+}
+
 // GET /api/me/semantic?kind=notes|chats&q=...
 // 检索;客户端没索引过时先建(chats 用服务端保存的会话正文,notes 用请求体带来的笔记文本)。
 function tc_api_me_semantic() {

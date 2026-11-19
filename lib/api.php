@@ -712,9 +712,40 @@ function tc_sanitize_chats($chats) {
             // 所以必须原样放过同步:白名单里漏掉它,客户端把列表推回云端一次,标记就永久丢了 ——
             // 换设备拉取后这些会话全变成普通对话,而本机看不出任何异常(本地副本自己还带着)。
             'apiKey' => !empty($c['apiKey']) ? substr((string) $c['apiKey'], 0, 64) : null,
+            // 归档标记:从侧栏时间分组里收起来,内容照旧保留(进墓碑的只有「删除」)。
+            // 与 apiKey 同理,白名单漏掉它,推一次同步归档就丢了。
+            'archived' => !empty($c['archived']),
+            'archivedAt' => !empty($c['archivedAt']) ? (float) $c['archivedAt'] : 0,
+            // 输入框草稿:用户写了没发的文字与附件(附件只存轻量文本,图片本体不进草稿)。
+            // 与 apiKey/archived 同理 —— 白名单漏掉它,换设备或一次冲突合并草稿就没了。
+            'draft' => tc_sanitize_chat_draft(isset($c['draft']) ? $c['draft'] : null),
         );
     }
     return $out;
+}
+
+// 输入框草稿的白名单清洗:只留文本与轻量附件字段,总长度设上限(草稿不该撑大同步包)
+function tc_sanitize_chat_draft($d) {
+    if (!is_array($d)) return null;
+    $text = (string) (isset($d['text']) ? $d['text'] : '');
+    if (strlen($text) > 20000) $text = substr($text, 0, 20000);
+    $atts = array();
+    $raw = isset($d['attachments']) && is_array($d['attachments']) ? $d['attachments'] : array();
+    foreach (array_slice($raw, 0, 8) as $a) {
+        if (!is_array($a)) continue;
+        $row = array(
+            'type' => (isset($a['type']) && $a['type'] === 'image') ? 'image' : 'file',
+            'name' => substr((string) (isset($a['name']) ? $a['name'] : ''), 0, 200),
+            'size' => isset($a['size']) && is_numeric($a['size']) ? (int) $a['size'] : 0,
+        );
+        if (!empty($a['mediaType'])) $row['mediaType'] = substr((string) $a['mediaType'], 0, 120);
+        if (isset($a['content']) && is_string($a['content'])) $row['content'] = substr($a['content'], 0, 20000);
+        if (isset($a['text']) && is_string($a['text'])) $row['text'] = substr($a['text'], 0, 20000);
+        if (!empty($a['imageAsText'])) $row['imageAsText'] = true;
+        $atts[] = $row;
+    }
+    if ($text === '' && !$atts) return null;
+    return array('text' => $text, 'attachments' => $atts, 'at' => isset($d['at']) ? (float) $d['at'] : tc_now());
 }
 
 function tc_sanitize_share_messages($messages) {
@@ -1451,7 +1482,15 @@ function tc_api_login() {
         foreach ($db['users'] as &$uu) {
             if ((string) $uu['id'] !== (string) $seenId) continue;
             $fp = tc_login_fingerprint();
-            $alert = !empty($db['settings']['loginAlertEnabled'])
+            // 「常用设备」上的指纹不再提醒:用户已经明说这台是自己的,
+            // 每次登录都发一封「新设备登录」只会训练用户忽略这类邮件。
+            $isTrustedFp = false;
+            if ($fp !== '' && !empty($uu['sessions']) && is_array($uu['sessions'])) {
+                foreach ($uu['sessions'] as $srow) {
+                    if (is_array($srow) && !empty($srow['trusted']) && (string) (isset($srow['fp']) ? $srow['fp'] : '') === $fp) { $isTrustedFp = true; break; }
+                }
+            }
+            $alert = !empty($db['settings']['loginAlertEnabled']) && !$isTrustedFp
                 && isset($uu['lastLoginFp']) && (string) $uu['lastLoginFp'] !== '' && (string) $uu['lastLoginFp'] !== $fp;
             $uu['lastLoginFp'] = $fp;
             if ($alert) tc_queue_login_alert($db, $uu);
@@ -2908,6 +2947,10 @@ function tc_storage_categories() {
               'desc' => '后台备份产生的数据快照'),
         array('key' => 'tasks', 'name' => '任务记录', 'path' => $data . '/tasks',
               'desc' => '生视频/异步任务的状态文件'),
+        // 语义搜索的向量索引:每用户一个 JSON。用户删了账号也不会自动消掉,
+        // 必须在存储管理里看得见、清得掉(内容是可被相似度反推的正文摘要,不是纯缓存)。
+        array('key' => 'vectors', 'name' => '语义索引', 'path' => $data . '/vectors',
+              'desc' => '语义搜索的向量索引（每用户一个文件，含笔记与会话摘要）'),
         array('key' => 'logs', 'name' => '运行日志', 'path' => $data . '/logs.ndjson', 'file' => true,
               'desc' => '后台「运行日志」页展示的记录'),
         array('key' => 'update', 'name' => '更新残留', 'path' => $data . '/update',
@@ -3186,6 +3229,10 @@ function tc_api_admin_storage_clean() {
                 $sz = (int) @filesize($legacy);
                 if (@unlink($legacy)) { $removed++; $freed += $sz; }
             }
+        } elseif ($target === 'vectors') {
+            // 语义索引:清空后下次搜索会按需重建(只重建被搜到的那部分),不影响会话与笔记本体
+            $label = '语义索引';
+            $rmDir($data . '/vectors');
         } elseif ($target === 'updates') {
             $label = '更新残留';
             $rmDir($data . '/update');

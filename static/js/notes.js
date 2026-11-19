@@ -1558,6 +1558,8 @@
   let semanticOn = false;
   let semanticIndexed = false;
   N.setSemanticEnabled = function (on) { semanticOn = !!on; };
+  // 用户在设置里清空了语义索引:下次「问笔记」要重新建,否则会一直以为已建过
+  N.resetSemanticIndex = function () { semanticIndexed = false; };
   function noteSemanticIndex() {
     if (!semanticOn || semanticIndexed || !N.doc.notes.length) return Promise.resolve(false);
     const items = N.doc.notes.slice(0, 400).map((n) => ({

@@ -787,6 +787,35 @@ html:not(.oc-boot) .oc-fade-boot { animation: emptyIn var(--dur-3) var(--ease-ou
 	  background: var(--text-secondary);
 	  opacity: 0.88;
 	}
+	/* 迷你轨道:整条竖线代表整场对话,亮段 = 当前视口在其中的位置。
+	   逐轮刻度告诉人「跳到第几轮」,这条告诉人「现在读到哪里」—— 几千条消息时后者更直观。 */
+	.chat-toc-track {
+	  position: absolute;
+	  top: 8px;
+	  bottom: 8px;
+	  left: 3px;
+	  width: 2px;
+	  border-radius: 2px;
+	  background: color-mix(in srgb, var(--text) 10%, transparent);
+	  pointer-events: none;
+	  opacity: 0;
+	  transition: opacity 0.2s;
+	}
+	.chat-toc:hover .chat-toc-track { display: none; }
+	.chat-toc.has-track .chat-toc-track { opacity: 1; }
+	.chat-toc-track::before {
+	  content: '';
+	  position: absolute;
+	  left: 0;
+	  width: 100%;
+	  top: var(--toc-start, 0%);
+	  height: var(--toc-len, 20%);
+	  min-height: 8px;
+	  border-radius: 2px;
+	  background: var(--accent);
+	  opacity: 0.55;
+	}
+	.chat-toc-track.short { display: none; }
 	.chat-toc-head,
 	.chat-toc-item { display: none !important; }
 	.chat-toc:hover,
