@@ -292,7 +292,8 @@ const extra = await (await fetch(BASE + '/api/auth/login', {
   body: JSON.stringify(ADMIN),
 })).json();
 check('额外登录拿到令牌', !!extra.token);
-await page.evaluate(() => window.loadDevices && window.loadDevices());
+// 面板已拆到 static/js/devices-panel.js,重载入口挂在 window.OCLoadDevices(不再有全局 loadDevices)
+await page.evaluate(() => window.OCLoadDevices && window.OCLoadDevices());
 await sleep(900);
 const devText2 = await page.textContent('#acc-device-list');
 check('新设备出现在列表里', (devText2 || '').indexOf('V220ExtraDevice') >= 0, (devText2 || '').slice(0, 120));

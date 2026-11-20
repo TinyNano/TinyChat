@@ -566,6 +566,7 @@ TinyChat/
 ├── lib/                   # PHP 后端
 │   ├── core.php           # 数据层（SQLite）、设置、JWT、密码、版本号
 │   ├── api.php            # 认证 / 供应商 / 助手 / 管理端
+│   ├── api-notes.php      # AI 笔记域：文档同步 / 附件 / 分享 / 版本历史 / 后台笔记管理
 │   ├── search.php         # 会话搜索（SQLite FTS5 索引与检索）
 │   ├── devices.php        # 登录设备管理（设备名单 / 单设备踢出 / 全部下线）
 │   ├── semantic.php       # 语义搜索（embeddings 调用 / 向量存储 / 余弦检索）
@@ -605,6 +606,7 @@ node tests/storage-panel-gui.mjs       # 真浏览器：存储管理的文件清
 node tests/focus-ring-gui.mjs          # 真浏览器：聚焦环 / 主题色恢复默认 / 字体切换往返 / 注册勾选行排版
 node tests/v220-contracts.js           # 源码契约：预览沙箱禁止项 / 工具字段两端接线 / 索引刷新 / 令牌 sid / 双链 / 归档 / 草稿 / 看板 / 代码块改写
 node tests/v220-gui.mjs                # 真浏览器：预览隔离与脚本开关 / 工具 chip / 登录设备 / 双链 / 归档 / 草稿 / 会话切换键 / 迷你轨道 / 代码块「让 AI 改」
+node tests/mobile-ux-gui.mjs           # 真手机尺寸（390×844 + 触屏）：抽屉切会话 / 归档 / 草稿 / 代码块改写 / 设备面板
 
 # 端到端冒烟：起真实 PHP 服务 + mock 上游，跑完整业务流
 bash tests/e2e.sh

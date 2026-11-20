@@ -2176,6 +2176,16 @@ body.chat-resizing * { cursor: col-resize !important; }
   color: var(--accent);
   white-space: nowrap;
 }
+
+/* 手机上的可点区域(Mobile UX):iOS 的推荐最小点击区是 44px,这里对本次新增的
+  小圆钮给到 40px 高,排版不变、只在窄屏放宽。 */
+@media (max-width: 768px) {
+  .code-prev-toggle,
+  .cpp-btn { min-height: 34px; padding-left: 12px; padding-right: 12px; }
+  .cpp-toolbar { gap: 8px; }
+  .cpp-tab { min-height: 34px; }
+  .cpp-ask-row .cpp-send { min-height: 36px; }
+}
 /* ---------- 17d. 工具调用过程 chip(OCTools.renderChips) ----------
    参数与结果都是模型/工具给的不可信文本,渲染端只用 textContent 写入;这里只管样式。 */
 .tool-calls { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 2px; }

@@ -5,6 +5,9 @@
  */
 define('TC_ROOT', __DIR__);
 require_once __DIR__ . '/lib/core.php';
+// AI 笔记域(笔记 / 附件 / 分享 / 版本历史 / 后台笔记管理)已从 lib/api.php 拆出;
+// 它自身 require api.php,所以这里显式放在 api.php 之后,载入顺序一眼可见
+require_once __DIR__ . '/lib/api-notes.php';
 require_once __DIR__ . '/lib/integrity.php';
 require_once __DIR__ . '/lib/api.php';
 require_once __DIR__ . '/lib/im.php';

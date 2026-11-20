@@ -101,9 +101,11 @@ check('快捷键速查弹窗出口存在', extrasJs.includes('openShortcutsModal
 check('每日摘要卡片挂载点存在', indexHtml.includes('digest-card-holder'));
 check('会话右键菜单有导出项', conversationsJs.includes("'export', label: '导出 Markdown'") && appJs.includes('onExport: (c) =>'));
 check('用量页有 14 天趋势容器', indexHtml.includes('usage2-trend') && appJs.includes('usage-trend-bar'));
-check('笔记分享可勾选允许留言', notesJs.includes("id=\"ns-comments\"") && apiPhp.includes("'allowComments' => $allowComments"));
+// 笔记接口已从 lib/api.php 拆到 lib/api-notes.php(只挪位置不改逻辑),断言跟着文件走
+const apiNotesPhp = read('lib/api-notes.php');
+check('笔记分享可勾选允许留言', notesJs.includes("id=\"ns-comments\"") && apiNotesPhp.includes("'allowComments' => $allowComments"));
 check('分享页有留言表单与发送端点', noteShareHtml.includes('share-cmt-send') && noteShareHtml.includes("/api/notes/shared/' + token + '/comment"));
-check('笔记云端版本推送与恢复', notesJs.includes('/api/notes/versions') && apiPhp.includes('tc_api_note_versions_push') && indexPhp.includes("'tc_api_note_versions_push'"));
+check('笔记云端版本推送与恢复', notesJs.includes('/api/notes/versions') && apiNotesPhp.includes('tc_api_note_versions_push') && indexPhp.includes("'tc_api_note_versions_push'"));
 check('ntv: 分片键接入装配与提交', corePhp.includes("strncmp($k, 'ntv:', 4)") && corePhp.includes("'ntv:' . $uid"));
 
 console.log('');
