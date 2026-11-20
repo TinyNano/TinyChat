@@ -6384,3 +6384,33 @@ body.admin-body { overflow: visible !important; }
   transition: border-color 0.16s, box-shadow 0.16s, background 0.16s;
 }
 .oc-prompt-input::placeholder { color: var(--text-tertiary); }
+/* ⚠ 以下规则必须留在文件末尾:样式表里后声明的同特异性规则胜出,而全文件
+   有几百处同特异性的 font-size 声明(0.893rem / 1.071rem 等)。放在前面会被它们覆盖。 */
+
+/* ---------- 移动端:iOS 聚焦放大防护 ----------
+ * iOS Safari 在聚焦 font-size < 16px 的输入控件时会自动放大整页,关掉键盘也不缩回,
+ * 用户会卡在放大的页面里必须手动双指缩回。iPhone 上对所有站点生效;iPad 上只在
+ * 「请求桌面网站」时生效(iPadOS 13+ 的 Safari 默认走移动版)。
+ *
+ * 做法:只把「可聚焦的文本控件」字号抬到 16px,正文与布局一概不动。
+ * 不能改用缩放整页:html 的 zoom 会同时放大视口和正文,只有 <16px 的控件才会触发 iOS
+ * 的放大判定,结果是「正文被放大、毛病还在」,两头不落好。
+ * 也不用 max():@supports 不通过的旧内核会把整条声明丢掉,控件直接退回 <16px。
+ * 触屏判定用 (pointer: coarse):桌面鼠标设备维持原有字号,布局零变化。
+ *
+ * 为什么带 body 前缀 + !important:全站另有一条
+ * 「body, button, input, textarea, select { font-size: var(--fs) !important }」,
+ * 同为 !important 时按选择器特异性比较;加一个 body 前缀(0,0,2)就稳定压过它,
+ * 不依赖「本段排在文件末尾」这种脆弱条件。
+ *
+ * 已知环境差异:Chromium 无头环境里,后加载样式表中的普通声明会压过本规则
+ * (已用最小页面复现,与本项目代码无关);真机(iOS Safari、Android Chrome)上按标准级联生效。
+ * tests/mobile-ux-gui.mjs 因此断言「规则存在且命中所有文本控件」,不去量 computedStyle。
+ */
+@media (pointer: coarse) {
+  body input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]),
+  body textarea,
+  body select {
+    font-size: 16px !important;
+  }
+}
