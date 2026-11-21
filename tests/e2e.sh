@@ -2385,6 +2385,22 @@ DEV2=$(curl -s "$BASE/api/auth/login" -H "Content-Type: application/json" -H "Us
 dlist=$(curl -s "$BASE/api/me/devices" -H "Authorization: Bearer $DEV1")
 assert_contains "设备列表含两台设备" "$dlist" 'E2EDeviceTwo/2.0'
 assert_contains "设备列表标出当前设备" "$dlist" '"current":true'
+# 设备备注名:多设备用户靠 UA 推导名分不清机器,备注是真正的抓手
+SID1=$(printf '%s' "$dlist" | tr '}' '\n' | grep 'E2EDeviceOne' | sed -n 's/.*"id":"\([a-z0-9]*\)".*/\1/p')
+[ -n "$SID1" ] && ok "取到第一台设备的 id" || bad "取到第一台设备的 id"
+printf '{"label":"我的工作本"}' > "$TMP/devlabel.json"
+assert_contains "设置设备备注" "$(curl -s -X POST "$BASE/api/me/devices/$SID1/label" -H "Authorization: Bearer $DEV1" -H "Content-Type: application/json" --data-binary @"$TMP/devlabel.json")" '{"ok":true,"label":"我的工作本"}'
+assert_contains "设备列表显示备注名" "$(curl -s "$BASE/api/me/devices" -H "Authorization: Bearer $DEV1")" '我的工作本'
+printf '{"label":""}' > "$TMP/devlabel.json"
+assert_contains "清空备注即清除" "$(curl -s -X POST "$BASE/api/me/devices/$SID1/label" -H "Authorization: Bearer $DEV1" -H "Content-Type: application/json" --data-binary @"$TMP/devlabel.json")" '"label":""'
+if curl -s "$BASE/api/me/devices" -H "Authorization: Bearer $DEV1" | grep -q '我的工作本'; then bad "清除后备注仍在"; else ok "清除后备注消失"; fi
+printf '{"label":"0123456789012345678901234567890123456789ABCDEFGH"}' > "$TMP/devlabel.json"
+assert_contains "40 字以上备注被截断" "$(curl -s -X POST "$BASE/api/me/devices/$SID1/label" -H "Authorization: Bearer $DEV1" -H "Content-Type: application/json" --data-binary @"$TMP/devlabel.json")" '0123456789012345678901234567890123456789'
+if curl -s "$BASE/api/me/devices" -H "Authorization: Bearer $DEV1" | grep -q 'IJKLMN'; then bad "备注未按 40 字截断"; else ok "备注按 40 字截断"; fi
+printf '{"label":"x"}' > "$TMP/devlabel.json"
+assert_contains "备注不存在设备回 404" "$(curl -s -X POST "$BASE/api/me/devices/ffffffffffffffff/label" -H "Authorization: Bearer $DEV1" -H "Content-Type: application/json" --data-binary @"$TMP/devlabel.json")" '该设备已下线'
+printf '{"label":""}' > "$TMP/devlabel.json"
+curl -s -X POST "$BASE/api/me/devices/$SID1/label" -H "Authorization: Bearer $DEV1" -H "Content-Type: application/json" --data-binary @"$TMP/devlabel.json" > /dev/null
 # 踢掉第二台:它的令牌立即失效,第一台不受影响
 SID2=$(printf '%s' "$dlist" | tr '}' '\n' | grep 'E2EDeviceTwo' | sed -n 's/.*"id":"\([a-z0-9]*\)".*/\1/p')
 [ -n "$SID2" ] && ok "取到第二台设备的 id" || bad "取到第二台设备的 id"

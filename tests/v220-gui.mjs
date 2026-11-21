@@ -285,6 +285,15 @@ const curMark = await page.textContent('#acc-device-list');
 check('当前设备有标记', (curMark || '').indexOf('当前设备') >= 0);
 check('设备行有 IP 与时间', /127\.0\.0\.1|::1/.test(curMark || '') && /登录于/.test(curMark || ''));
 check('当前设备的按钮是「退出登录」', /退出登录/.test(curMark || ''));
+// 设备备注名:弹 OCUI.prompt,保存后列表以备注为主标题
+await page.evaluate(() => { const b = document.querySelector('#acc-device-list [data-rename]'); if (b) b.click(); });
+await sleep(400);
+check('备注弹窗出现', await page.evaluate(() => !!document.querySelector('.oc-prompt-input')));
+await page.fill('.oc-prompt-input', '我的笔记本');
+await page.evaluate(() => { const ok = document.querySelector('.oc-confirm-mask [data-act="ok"]'); if (ok) ok.click(); });
+await sleep(900);
+check('备注名显示在列表里', (await page.textContent('#acc-device-list')).indexOf('我的笔记本') >= 0, (await page.textContent('#acc-device-list')).slice(0, 120));
+check('备注按钮带当前值(再次打开可改)', await page.evaluate(() => (document.querySelector('#acc-device-list [data-rename]') || {}).dataset.name === '我的笔记本'));
 // 再登录一台(mock 一个不同 UA 的会话),列表里应多出一行,并可以踢掉它
 const extra = await (await fetch(BASE + '/api/auth/login', {
   method: 'POST',
@@ -576,6 +585,17 @@ const afterOk = await page.evaluate(() => {
 });
 check('改写后代码块内容被替换', afterOk.code.indexOf('REWRITTEN') >= 0 && afterOk.code.indexOf('预览成功') < 0, afterOk.code.slice(0, 80));
 check('改写后出现修订标记', !afterOk.verHidden && /修订 v2/.test(afterOk.ver), afterOk.ver);
+// 回填必须保留语法高亮:R.highlight 一度抛 ReferenceError 被吞掉,内容换成了纯文本 ——
+// 源码断言钉不住运行时行为,这里量 <code> 里有没有 hljs 着色的 span
+check('改写后保留语法高亮', await page.evaluate(() => {
+  const code = document.querySelector('.msg.assistant .code-block pre code');
+  return code.classList.contains('hljs') && code.querySelector('span') !== null;
+}));
+check('改写后复制按钮仍然指向本块(监听未失联)', await page.evaluate(() => {
+  const b = document.querySelector('.msg.assistant .code-block');
+  const btn = b.querySelector('.code-copy');
+  return !!btn && btn.dataset.bound === '1';
+}));
 check('改写后自动切到预览', afterOk.previewTab && afterOk.codeHidden);
 check('回填后的预览仍在不透明源沙箱里', !!afterOk.sandbox && afterOk.sandbox.indexOf('allow-same-origin') < 0, afterOk.sandbox);
 check('预览文档里是新代码', afterOk.srcdoc.indexOf('REWRITTEN') >= 0, afterOk.srcdoc.slice(0, 120));
@@ -598,6 +618,44 @@ const afterUndo = await page.evaluate(() => {
 check('撤销后代码回到原版', afterUndo.code === origCode, afterUndo.code.slice(0, 60));
 check('撤销后修订标记消失', afterUndo.verHidden && afterUndo.undoHidden);
 check('撤销后预览同步回原版', afterUndo.srcdoc.indexOf('预览成功') >= 0 && afterUndo.srcdoc.indexOf('REWRITTEN') < 0);
+
+// 4) 连续两轮改写 + 逐版回退:replaceCode 曾因整块换节点让闭包变成孤儿,
+//    第二轮改写与第二次撤销都会悄悄作用在已断连的旧节点上(界面纹丝不动)。
+//    mock-rewrite 的 [v2] 指令返回与第一轮不同的内容,专门用来喂这一段。
+const multi = await (async () => {
+  const ask = async (text) => {
+    // 面板收起先展开;表单收起再点「让 AI 改」—— 按钮可见不等于表单已打开
+    await page.evaluate(() => {
+      const block = document.querySelector('.msg.assistant .code-block');
+      if (block.querySelector('.code-prev-panel').classList.contains('hidden')) {
+        block.querySelector('.code-prev-toggle').click();
+      }
+      if (block.querySelector('.cpp-ask').classList.contains('hidden')) {
+        block.querySelector('[data-act="ask-ai"]').click();
+      }
+    });
+    await sleep(200);
+    await page.fill('.msg.assistant .code-block .cpp-ask-input', text);
+    await page.evaluate(() => document.querySelector('.msg.assistant .code-block .cpp-ask').requestSubmit());
+    await sleep(1600);
+  };
+  const snap = () => page.evaluate(() => {
+    const b = document.querySelector('.msg.assistant .code-block');
+    return { code: b.querySelector('pre code').textContent, ver: b.querySelector('.cpp-ver').textContent };
+  });
+  await ask('[v2] 再改一次');
+  const after2 = await snap();
+  await page.evaluate(() => document.querySelector('.msg.assistant .code-block [data-act="undo-ai"]').click());
+  await sleep(300);
+  const back1 = await snap();
+  await page.evaluate(() => document.querySelector('.msg.assistant .code-block [data-act="undo-ai"]').click());
+  await sleep(300);
+  const back2 = await snap();
+  return { after2, back1, back2 };
+})();
+// 前面的段落已把修订栈撤空,这轮从原版起步:改写 → 撤销 → 再改写,正是当初闭包失联的场景
+check('撤销后再次改写生效', multi.after2.code.indexOf('REWRITTEN2') >= 0 && /修订 v2/.test(multi.after2.ver), JSON.stringify(multi.after2).slice(0, 120));
+check('再次撤销回到原版', multi.back1.code === origCode && multi.back1.ver === '', JSON.stringify(multi.back1).slice(0, 120));
 // 预览页里的样例脚本会尝试读 localStorage:被沙箱挡住是预期结果(这正是隔离在起作用),
 // 浏览器把它记成 pageerror。只排除这一条,其它异常仍然算失败。
 const realErrors = pageErrors.filter((e) => e.indexOf("The document is sandboxed and lacks the 'allow-same-origin' flag") < 0);

@@ -362,6 +362,9 @@ if ($toolModel === 'mock-rewrite') {
         $content = '抱歉，我看不出你想改哪一部分。';
     } elseif (strpos($prompt, '[same]') !== false) {
         $content = "```html\n" . $cur . "\n```";
+    } elseif (strpos($prompt, '[v2]') !== false) {
+        // 第二轮改写:内容必须与第一轮不同,否则前端「没有新代码」的判定会拦下
+        $content = "```html\n<!doctype html>\n<html><body><h1 id=\"hello\">REWRITTEN2</h1></body></html>\n```";
     } else {
         $content = "```html\n<!doctype html>\n<html><body><h1 id=\"hello\">REWRITTEN</h1></body></html>\n```";
     }

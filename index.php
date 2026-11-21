@@ -5,11 +5,11 @@
  */
 define('TC_ROOT', __DIR__);
 require_once __DIR__ . '/lib/core.php';
-// AI 笔记域(笔记 / 附件 / 分享 / 版本历史 / 后台笔记管理)已从 lib/api.php 拆出;
-// 它自身 require api.php,所以这里显式放在 api.php 之后,载入顺序一眼可见
-require_once __DIR__ . '/lib/api-notes.php';
 require_once __DIR__ . '/lib/integrity.php';
 require_once __DIR__ . '/lib/api.php';
+// AI 笔记域(笔记 / 附件 / 分享 / 版本历史 / 后台笔记管理)已从 lib/api.php 拆出;
+// 函数体逐字未改,依赖 api.php 的通用件(tc_with_db / tc_json 等),必须跟在其后
+require_once __DIR__ . '/lib/api-notes.php';
 require_once __DIR__ . '/lib/im.php';
 require_once __DIR__ . '/lib/proxy.php';
 require_once __DIR__ . '/lib/web.php';
@@ -206,6 +206,7 @@ function tc_dispatch($method, $path) {
         array('DELETE', '#^/api/me/devices/([^/]+)$#', 'tc_api_me_device_revoke'),
         array('POST', '#^/api/me/devices/revoke-all$#', 'tc_api_me_devices_revoke_all'),
         array('POST', '#^/api/me/devices/([^/]+)/trust$#', 'tc_api_me_device_trust'),
+        array('POST', '#^/api/me/devices/([^/]+)/label$#', 'tc_api_me_device_label'),
         array('GET', '#^/api/admin/invites$#', 'tc_api_admin_invites_list'),
         array('POST', '#^/api/admin/invites$#', 'tc_api_admin_invites_create'),
         array('DELETE', '#^/api/admin/invites/([^/]+)$#', 'tc_api_admin_invites_delete'),

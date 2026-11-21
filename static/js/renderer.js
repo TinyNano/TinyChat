@@ -966,9 +966,17 @@ R.render = function (text) {
   // 单段代码(不带围栏)交给同一个高亮函数渲染,返回完整的 .code-block。
   // 预览的「让 AI 改」回填时用它:换掉旧块后仍然是有高亮、能复制、能再预览的代码块,
   // 而不是一坨转义文本。调用方传的是已经取好的纯代码,这里不解析 Markdown。
+  // 高亮实现就是 md 初始化时传入的 highlight 回调(mermaid/思维导图的特例也在里面),
+  // 别处没有同名函数 —— 之前这里写成裸调用 highlight(...),运行时直接
+  // ReferenceError 被 preview.js 的 try/catch 吞掉,回填静默退化成无高亮纯文本。
   R.highlight = function (code, lang) {
     const info = String(lang || '').trim();
-    return highlight(String(code == null ? '' : code), info, '');
+    const src = String(code == null ? '' : code);
+    const fn = md && md.options && md.options.highlight;
+    if (typeof fn === 'function') return fn(src, info);
+    // md 还没建好(理论上不会发生:回填只发生在渲染之后)。退化为转义文本,不抛错。
+    return '<div class="code-block" data-lang="' + escapeAttr(info) + '"><div class="code-header"><span class="code-lang">'
+      + escapeHtml(info) + '</span></div><pre><code>' + escapeHtml(src) + '</code></pre></div>';
   };
 
   /**

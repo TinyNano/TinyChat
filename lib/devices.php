@@ -112,6 +112,7 @@ function tc_devices_public($user, $payload) {
         $out[] = array(
             'id' => (string) $sid,
             'label' => tc_device_label(isset($row['ua']) ? $row['ua'] : ''),
+            'customName' => isset($row['customName']) ? (string) $row['customName'] : '',
             'ip' => isset($row['ip']) ? (string) $row['ip'] : '',
             'ua' => isset($row['ua']) ? (string) $row['ua'] : '',
             'createdAt' => (int) (isset($row['time']) ? $row['time'] : 0),
@@ -204,6 +205,39 @@ function tc_api_me_device_trust($sid) {
         tc_log_auth_event('auth', $user['name'], $on ? '标记常用设备' : '取消常用设备', $user['id']);
     });
     tc_json(200, array('ok' => true, 'trusted' => $on));
+}
+
+// POST /api/me/devices/{sid}/label  {label: '我的笔记本'}
+// 设备备注名:按指纹整台生效(同一台机器的多个会话共用一个名字,与「常用」同一口径)。
+// 留空 = 清除备注,回退到按 UA 推导的名称。UA 厂商字符串(Chrome · Windows)对多设备
+// 用户几乎无法区分,备注名才是让人认出「这是哪台机器」的抓手。
+function tc_api_me_device_label($sid) {
+    $sid = substr(trim((string) $sid), 0, 64);
+    if ($sid === '') tc_fail(400, '缺少设备标识');
+    $b = tc_read_json_body(8192);
+    if (!isset($b['label']) || !is_string($b['label'])) tc_fail(400, '缺少备注内容');
+    $label = trim((string) $b['label']);
+    if (function_exists('mb_substr')) $label = mb_substr($label, 0, 40, 'UTF-8');
+    else $label = substr($label, 0, 40);
+    tc_with_db(true, function (&$db) use ($sid, $label) {
+        $user = tc_require_auth($db);
+        foreach ($db['users'] as &$u) {
+            if ((string) $u['id'] !== (string) $user['id']) continue;
+            if (!isset($u['sessions'][$sid]) || !is_array($u['sessions'][$sid])) tc_fail(404, '该设备已下线');
+            $fp = (string) (isset($u['sessions'][$sid]['fp']) ? $u['sessions'][$sid]['fp'] : '');
+            foreach ($u['sessions'] as $k => $row) {
+                if (!is_array($row)) continue;
+                if ((string) $k === $sid || ($fp !== '' && (string) (isset($row['fp']) ? $row['fp'] : '') === $fp)) {
+                    if ($label === '') unset($u['sessions'][$k]['customName']);
+                    else $u['sessions'][$k]['customName'] = $label;
+                }
+            }
+            break;
+        }
+        unset($u);
+        tc_log_auth_event('auth', $user['name'], $label === '' ? '清除设备备注' : '设置设备备注', $user['id']);
+    });
+    tc_json(200, array('ok' => true, 'label' => $label));
 }
 
 // DELETE /api/me/devices:退出除本机外的所有设备(保留当前 sid,当前会话不受影响)

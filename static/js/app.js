@@ -2329,7 +2329,6 @@ function buildMsgNode(m, chat, idx) {
         const root = document.createElement('div');
         root.className = 'stream-answer';
         contentDiv.appendChild(root);
-        if (window.OCPreview) window.OCPreview.carryHistory(root);
         if (window.OCRenderer && window.OCRenderer.renderStreamingInto) {
           window.OCRenderer.renderStreamingInto(root, m.content);
         } else {
@@ -3859,7 +3858,6 @@ function paintStreamingText(assistantMsg) {
     contentEl.appendChild(root);
   }
   if (window.OCRenderer && window.OCRenderer.renderStreamingInto) {
-    if (window.OCPreview) window.OCPreview.carryHistory(root);
     window.OCRenderer.renderStreamingInto(root, assistantMsg.content || '');
     highlightGroupMentions(root, currentChat());
   } else {

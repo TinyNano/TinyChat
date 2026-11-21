@@ -115,6 +115,10 @@ const devSrc2 = read('lib/devices.php');
 check('常用设备按浏览器指纹继承', /tc_device_register[\s\S]*?\$trusted = true/.test(dev));
 check('常用设备跳过新设备提醒', /\$isTrustedFp/.test(api));
 check('常用设备接口注册', /tc_api_me_device_trust/.test(read('index.php')));
+check('设备备注接口注册', /tc_api_me_device_label'/.test(read('index.php')));
+check('备注名随设备列表下发', /'customName' => isset/.test(dev));
+check('备注超长截断、留空清除', /mb_substr\(\$label, 0, 40/.test(dev) && /unset\(\$u\['sessions'\]\[\$k\]\['customName'\]\)/.test(dev));
+check('设备面板有备注入口', /data-rename/.test(read('static/js/devices-panel.js')) && /\/label'/.test(read('static/js/devices-panel.js')));
 check('迷你轨道随滚动同步', /function syncTocTrack/.test(app) && /has-track/.test(app));
 check('草稿按会话保存与恢复', /function saveComposerDraft/.test(app) && /function restoreComposerDraft/.test(app));
 check('发送时清掉草稿', /clearComposerDraft\(currentChat\(\)\)/.test(app));
@@ -130,11 +134,19 @@ check('改写单独计费用途', /_purpose: 'rewrite'/.test(app) && /'rewrite' 
 check('四种上游格式都覆盖', ['body.system = system', 'body.instructions = system', "body.prompt = system", "{ role: 'system', content: system }"].every((k) => app.indexOf(k) >= 0));
 check('改写提示要求只回代码', /COMPLETE updated code/.test(app) && /no explanations/.test(app));
 check('回填复用渲染器的高亮(不是纯文本替换)', /R\.highlight = function/.test(read('static/js/renderer.js')) && /R\.highlight\(String\(text\), lang\)/.test(pv));
-check('回填后重新挂增强(复制/预览都还在)', /if \(R\.enhance\) R\.enhance\(fresh\)/.test(pv));
+check('回填后无需重新挂增强(原地更新,监听全部存活)', !/R\.enhance\(fresh\)/.test(pv));
 check('没有新代码时不静默成功', /coarseChanged\(codeOf\(block\), code\)/.test(pv) && /没有给出新的代码/.test(pv));
 check('无围栏回答里只有中文说明时不当代码', /\(\?!\[\^\u4e00-\u9fff\]\)/.test(pv) === false && /\[\u4e00-\u9fff\]/.test(pv) && /if \(head < 0\) return '';/.test(pv));
 check('修订可在原地撤销/回退', /const undoRewrite = /.test(pv) && /撤销 AI 修改/.test(pv) && /回退 \(v/.test(pv));
-check('修订跨重绘交接(流式渲染不丢)', /P\.carryHistory = function/.test(pv) && (app.match(/carryHistory\(/g) || []).length >= 2);
+// 回填走渲染器真正的高亮实现(md 初始化时的回调):之前 R.highlight 裸调 highlight(),
+// 运行时 ReferenceError 被吞掉,回填静默退化成无高亮纯文本 —— 源码里看不出,必须钉住
+check('回填高亮走 md.options.highlight(不是裸调用)', /R\.highlight = function/.test(read('static/js/renderer.js'))
+  && /md\.options && md\.options\.highlight/.test(read('static/js/renderer.js'))
+  && !/return highlight\(/.test(read('static/js/renderer.js')));
+check('回填只换 <code> 内容(整块 replaceWith 会让闭包变孤儿)', /codeEl\.innerHTML = freshCode\.innerHTML/.test(pv)
+  && !/block\.replaceWith\(fresh\)/.test(pv));
+check('跨重绘交接机制已移除(修订随节点生灭,与刷新同口径)', !/carryHistory/.test(pv) && !/carryHistory/.test(app), '残留引用');
+
 check('改写后的预览仍走同一沙箱规则', /P\.sandboxFor\(allowScripts\)/.test(pv));
 check('面板树内按钮都带 type', !/<button class="/.test(pv));
 
