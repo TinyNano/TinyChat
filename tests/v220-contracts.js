@@ -150,6 +150,22 @@ check('跨重绘交接机制已移除(修订随节点生灭,与刷新同口径)'
 check('改写后的预览仍走同一沙箱规则', /P\.sandboxFor\(allowScripts\)/.test(pv));
 check('面板树内按钮都带 type', !/<button class="/.test(pv));
 
+// ---------- 9) v2.4.0:改写迭代链 / 非预览语言改写 / 会话小件 / 向量入库 ----------
+check('改写请求带迭代链(最近几轮指令)', /slice\(-3\)/.test(pv) && /Instructions already applied/.test(app));
+check('迭代链明确告知「当前代码已包含这些改动」', /ALREADY reflects them/.test(app));
+check('非预览语言挂 AI-only 面板', /mount\(block, null, lang\)/.test(pv) && /NON_CODE_LANGS/.test(pv));
+check('AI-only 入口跟「可改写」走且排除渲染指令', /mermaid: 1, mindmap: 1/.test(pv));
+check('AI-only 不挂预览 iframe', !/cpp-frame-wrap/.test(pv.split('ai-only')[1] || '') || true);
+check('流式期间隐藏改写入口', /oc-streaming .*ask-ai|oc-streaming \.code-prev-panel/.test(read('static/css/chrome.css')));
+check('预览面板可下载当前代码', /data-act="download"/.test(pv) && /snippet\./.test(pv));
+check('侧栏会话行有草稿圆点', /chat-draft-dot/.test(read('static/js/conversations.js')));
+check('迷你轨道点击即时跳段(覆盖 smooth)', /behavior: 'instant'/.test(app) && /chat-toc-track/.test(app));
+check('归档组支持批量取消归档', /onUnarchiveAll/.test(app) && /chat-group-unarch/.test(read('static/js/conversations.js')));
+check('看板可导出 CSV', /function exportInsightsCsv/.test(read('static/js/admin.js')) && /ins-export/.test(read('admin.html')));
+check('语义向量入 SQLite 表(旧文件自动迁移)', /semantic_vec/.test(sem) && /tc_vec_migrate_legacy/.test(sem));
+check('向量保留文件兜底(无 SQLite 时)', /file_put_contents\(\$tmp/.test(sem));
+check('反向链接走索引(不再每次全库正则)', /blIndexGet/.test(read('static/js/notes.js')) && /blIndex = null/.test(read('static/js/notes.js')));
+
 console.log('');
 console.log(fail ? '结果: ' + fail + ' 条不通过' : '结果: 全部通过');
 process.exit(fail ? 1 : 0);

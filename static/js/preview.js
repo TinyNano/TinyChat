@@ -1,7 +1,7 @@
 'use strict';
 /**
  * preview.js — HTML / SVG 代码块的「预览」标签页(对话、笔记预览、分享页共用),
- * 以及对话里的「让 AI 改」闭环(改完就地把新代码写回这个代码块)。
+ * 以及对话里代码块的「让 AI 改」闭环(改完就地把新代码写回这个代码块)。
  *
  * 为什么必须放在不透明源沙箱里:
  *   模型输出的 HTML/SVG 是不可信内容,而本页面的 localStorage 里放着登录令牌(oc_token)。
@@ -12,6 +12,11 @@
  * 与在线工具箱(toolbox.js)、Artifacts 面板(multimodal.js)的区别:
  *   那两个入口默认允许脚本。这里的预览是「看一眼长什么样」:默认不给 allow-scripts,
  *   代码里的动画/交互脚本会按需在沙箱内打开 —— 打开预览不会自己弹窗、跳转或死循环。
+ *
+ * 两种挂载形态:
+ *   - 完整面板(kind = html/svg):代码/预览标签 + 运行脚本开关 + 下载 + 让 AI 改 + 撤销;
+ *   - AI-only 面板(kind = null,JS/Python 等非预览语言):没有预览能力,只有改写与撤销。
+ *     改写本来就不依赖预览 —— 入口跟着「可改写」走,而不是跟着「可预览」走。
  *
  * 接入:R.enhance() 里调用 OCPreview.enhance(container)。面板状态(标签/展开/是否允许
  * 脚本)只存在 DOM 上,不进会话数据,不参与云同步。修订栈也存在代码块节点上,随节点生灭:
@@ -32,6 +37,8 @@
   // 未标注语言的块:内容看着就是一个页面才认。宁可漏判也不要误判 —— 一段讨论标签的
   // 普通文本被当页面渲染,用户看到的是一堆被浏览器「修好」的标签,比没有预览更糟。
   const MARKUP_HEAD = /<!doctype\s+html|<html[\s>]|<body[\s>]|<svg[\s>]/i;
+  // 这些「语言」不是代码:mermaid/思维导图是渲染指令,纯文本没有改写意义
+  const NON_CODE_LANGS = { text: 1, plaintext: 1, mermaid: 1, mindmap: 1 };
 
   // 代码块内容:取 <code> 的文本(高亮后与原代码一致),不含表头按钮
   function codeOf(block) {
@@ -47,6 +54,12 @@
     if (SVG_LANGS[lang]) return 'svg';
     return '';
   };
+
+  // 该块能不能交给 AI 改写(与「能不能预览」是两回事)
+  function aiEligible(lang) {
+    const l = String(lang || '').trim().toLowerCase().split(/\s+/)[0];
+    return !!rewriteHandler && !!l && !NON_CODE_LANGS[l];
+  }
 
   // 未标注/标成 text 的块只有在「首行就是文档声明」时才当页面(片段不猜,避免误伤)
   P.looksLikeMarkup = function (text) {
@@ -177,6 +190,8 @@
   // ---------- 修订栈(存在代码块节点上) ----------
   // { orig: 原始代码, stack: [{code, prompt}], out: 当前代码 }
   // 「撤销 AI 修改」= 弹出一层回到上一版;全部弹出后回到 orig。
+  // stack 里同时留着每轮指令:下一轮改写会把最近几条作为上下文带给模型,
+  // 让「保持刚才的深色,再加个按钮」这类增量说法成立。
   function historyOf(block) {
     let h = block._ocPrevHistory;
     if (!h || typeof h !== 'object') {
@@ -193,7 +208,7 @@
     return !!norm(b) && norm(a) !== norm(b);
   }
 
-  function refreshToolbar(block, panel, lang) {
+  function refreshToolbar(block, panel, lang, preview) {
     const h = block._ocPrevHistory || { stack: [] };
     const depth = (h.stack || []).length;
     const badge = panel.querySelector('.cpp-ver');
@@ -207,38 +222,39 @@
       undo.classList.toggle('hidden', !depth && !(h.out && h.out !== h.orig));
       undo.textContent = depth > 1 ? '回退 (v' + depth + ')' : '撤销 AI 修改';
     }
-    // 「让 AI 改」只对能预览的块给(改写本来就是围绕页面/图形这两个场景设计的)
+    // 「让 AI 改」跟着「可改写」走,不跟着「可预览」走
     const aiBtn = panel.querySelector('[data-act="ask-ai"]');
     if (aiBtn) {
-      aiBtn.classList.toggle('hidden', !rewriteHandler || !kindOk(lang));
-      aiBtn.title = rewritableHint(lang);
+      aiBtn.classList.toggle('hidden', !aiEligible(lang));
+      aiBtn.title = aiEligible(lang) ? '描述想要的改动，AI 会直接改这段代码' : '这个块没有可改写的语言';
     }
   }
-  function kindOk(lang) {
-    const l = String(lang || '').toLowerCase();
-    return !!(HTML_LANGS[l] || SVG_LANGS[l]);
-  }
-  function rewritableHint(lang) {
-    if (!kindOk(lang)) return '只能对 HTML / SVG 代码块使用';
-    if (!rewriteHandler) return '在对话里打开才能让 AI 修改';
-    return '描述想要的改动，AI 会直接改这段代码';
-  }
 
-  function mount(block, kind) {
+  function mount(block, kind, langAttr) {
+    const preview = kind != null;
+    // 未标注语言的块被识别成页面时,把 data-lang 修正为真实语言:表头标签更准确,
+    // 改写请求与回填高亮也都拿到正确的语言(否则 extractCode 匹配不到同语言围栏)
+    if (preview && langAttr && !HTML_LANGS[langAttr] && !SVG_LANGS[langAttr]) {
+      block.setAttribute('data-lang', kind);
+      langAttr = kind;
+    }
     block.dataset.prevMounted = '1';
     block.classList.add('has-preview');
     const header = block.querySelector(':scope > .code-header');
     if (!header) return;
     block._ocPrevHistory = { orig: codeOf(block), stack: [], out: '' };
 
+    // 表头入口:完整面板是「预览」切换钮,AI-only 是「让 AI 改」直接开面板
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'code-prev-toggle';
+    btn.className = 'code-prev-toggle' + (preview ? '' : ' code-ai-toggle');
     btn.setAttribute('aria-expanded', 'false');
-    btn.textContent = kind === 'svg' ? '预览图形' : '预览';
+    btn.textContent = preview ? (kind === 'svg' ? '预览图形' : '预览') : '让 AI 改';
     const actions = header.querySelector('.code-actions');
-    if (actions) actions.insertBefore(btn, actions.firstChild);
-    else {
+    if (actions) {
+      if (preview) actions.insertBefore(btn, actions.firstChild);
+      else actions.appendChild(btn);
+    } else {
       const box = document.createElement('span');
       box.className = 'code-actions';
       box.appendChild(btn);
@@ -247,28 +263,35 @@
 
     // 树内的 <button> 都显式写 type:分享页/笔记页的代码块不一定在表单外
     const panel = document.createElement('div');
-    panel.className = 'code-prev-panel hidden';
+    panel.className = 'code-prev-panel hidden' + (preview ? '' : ' ai-only');
     panel.innerHTML = '<div class="cpp-toolbar">'
-      + '<div class="cpp-tabs" role="tablist">'
-      + '<button type="button" class="cpp-tab active" data-tab="code" role="tab">代码</button>'
-      + '<button type="button" class="cpp-tab" data-tab="preview" role="tab">预览</button>'
-      + '</div>'
+      + (preview
+        ? '<div class="cpp-tabs" role="tablist">'
+          + '<button type="button" class="cpp-tab active" data-tab="code" role="tab">代码</button>'
+          + '<button type="button" class="cpp-tab" data-tab="preview" role="tab">预览</button>'
+          + '</div>'
+        : '<span class="cpp-ai-label">让 AI 改</span>')
       + '<span class="cpp-ver hidden"></span>'
       + '<span class="cpp-spacer"></span>'
-      + '<label class="cpp-scripts" title="在沙箱内运行代码里的脚本（仍然读不到本站任何数据）"><input type="checkbox"> 运行脚本</label>'
+      + (preview
+        ? '<label class="cpp-scripts" title="在沙箱内运行代码里的脚本（仍然读不到本站任何数据）"><input type="checkbox"> 运行脚本</label>'
+        : '')
       + '<button type="button" class="cpp-btn hidden" data-act="undo-ai">撤销 AI 修改</button>'
       + '<button type="button" class="cpp-btn hidden" data-act="ask-ai">让 AI 改</button>'
-      + '<button type="button" class="cpp-btn" data-act="refresh" title="用当前代码重新加载预览">刷新</button>'
+      + '<button type="button" class="cpp-btn" data-act="download" title="把当前代码下载为文件">下载</button>'
+      + (preview
+        ? '<button type="button" class="cpp-btn" data-act="refresh" title="用当前代码重新加载预览">刷新</button>'
+        : '')
       + '</div>'
       + '<form class="cpp-ask hidden">'
       + '<textarea class="cpp-ask-input" rows="2" placeholder="说说想怎么改，例如：把背景换成深色、按钮改成圆角"></textarea>'
       + '<div class="cpp-ask-row"><span class="cpp-ask-tip">AI 改写的代码会直接替换本块，可随时撤销</span>'
       + '<button type="button" class="cpp-btn cpp-send" data-act="send-ai">发送</button></div>'
       + '</form>'
-      + '<div class="cpp-body"><div class="cpp-frame-wrap hidden"></div></div>';
+      + (preview ? '<div class="cpp-body"><div class="cpp-frame-wrap hidden"></div></div>' : '');
     block.appendChild(panel);
 
-    const wrap = panel.querySelector('.cpp-frame-wrap');
+    const wrap = preview ? panel.querySelector('.cpp-frame-wrap') : null;
     const codePre = block.querySelector(':scope > pre');
     const askForm = panel.querySelector('.cpp-ask');
     const askInput = panel.querySelector('.cpp-ask-input');
@@ -278,6 +301,7 @@
     let busy = false;
 
     const renderFrame = () => {
+      if (!preview) return;
       if (!frame) {
         frame = document.createElement('iframe');
         frame.className = 'oc-prev-frame';
@@ -289,9 +313,10 @@
       frame.setAttribute('sandbox', P.sandboxFor(allowScripts));
       frame.srcdoc = buildDoc(kind, codeOf(block), themeDark());
     };
-    const reset = () => { wrap.innerHTML = ''; frame = null; };
+    const reset = () => { if (wrap) { wrap.innerHTML = ''; frame = null; } };
 
     const showTab = (next) => {
+      if (!preview) return;
       tab = next;
       panel.querySelectorAll('.cpp-tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === next));
       if (codePre) codePre.classList.toggle('cpp-hidden', next === 'preview');
@@ -305,15 +330,15 @@
       btn.setAttribute('aria-expanded', open ? 'true' : 'false');
       btn.classList.toggle('active', open);
       if (open) {
-        showTab(tab);
-        refreshToolbar(block, panel, block.getAttribute('data-lang'));
+        if (preview) showTab(tab);
+        refreshToolbar(block, panel, langAttr, preview);
         // 展开的预览会把下方内容推低,用户刚才点的按钮可能已在可视区外;滚回表头,
         // 让「再点一次收起」始终够得着
         if (typeof btn.scrollIntoView === 'function') btn.scrollIntoView({ block: 'nearest' });
       } else {
         reset();
         askForm.classList.add('hidden');
-        if (codePre) codePre.classList.remove('cpp-hidden');
+        if (preview && codePre) codePre.classList.remove('cpp-hidden');
       }
     };
 
@@ -331,7 +356,7 @@
       h.stack.push({ code: String(code), prompt: String(prompt || '') });
       if (!replaceCode(block, code)) return false;
       h.out = String(code);
-      refreshToolbar(block, panel, block.getAttribute('data-lang'));
+      refreshToolbar(block, panel, langAttr, preview);
       return true;
     };
 
@@ -341,9 +366,9 @@
       const back = h.stack && h.stack.length ? h.stack[h.stack.length - 1].code : h.orig;
       if (!replaceCode(block, back)) return;
       h.out = back;
-      refreshToolbar(block, panel, block.getAttribute('data-lang'));
+      refreshToolbar(block, panel, langAttr, preview);
       // 代码已换,预览开着就同步刷新(否则显示的还是旧版本)
-      if (tab === 'preview') { reset(); renderFrame(); }
+      if (preview && tab === 'preview') { reset(); renderFrame(); }
     };
 
     btn.addEventListener('click', () => setOpen(panel.classList.contains('hidden')));
@@ -352,6 +377,16 @@
       if (t) { showTab(t.dataset.tab); return; }
       if (e.target.closest('[data-act="refresh"]')) { reset(); renderFrame(); return; }
       if (e.target.closest('[data-act="undo-ai"]')) { undoRewrite(); return; }
+      if (e.target.closest('[data-act="download"]')) {
+        const ext = (kind || langAttr || 'txt').toLowerCase().split(/\s+/)[0] || 'txt';
+        const blob = new Blob([codeOf(block)], { type: 'text/plain;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'snippet.' + ext;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+        return;
+      }
       if (e.target.closest('[data-act="ask-ai"]')) {
         if (busy) return;
         const opening = askForm.classList.contains('hidden');
@@ -361,7 +396,8 @@
       }
       if (e.target.closest('[data-act="send-ai"]')) askForm.requestSubmit ? askForm.requestSubmit() : sendAsk();
     });
-    panel.querySelector('.cpp-scripts input').addEventListener('change', (e) => {
+    const scriptsInput = panel.querySelector('.cpp-scripts input');
+    if (scriptsInput) scriptsInput.addEventListener('change', (e) => {
       allowScripts = !!e.target.checked;
       if (tab === 'preview') { reset(); renderFrame(); }
     });
@@ -376,7 +412,10 @@
       if (!prompt) { if (askInput) askInput.focus(); return; }
       setBusy(true);
       const lang = String(block.getAttribute('data-lang') || '');
-      Promise.resolve(rewriteHandler({ code: codeOf(block), prompt, lang, kind }))
+      // 迭代链:最近几轮指令随请求带上,「保持刚才的深色,再加个按钮」才成立
+      const h = historyOf(block);
+      const prev = (h.stack || []).slice(-3).map((s) => String(s.prompt || '').slice(0, 150));
+      Promise.resolve(rewriteHandler({ code: codeOf(block), prompt, lang, kind: kind || '', prev }))
         .then((reply) => {
           const code = P.extractCode(reply, lang);
           if (!coarseChanged(codeOf(block), code)) {
@@ -387,8 +426,8 @@
           applyRewrite(code, prompt);
           askInput.value = '';
           askForm.classList.add('hidden');
-          // 直接切到预览看结果(改写的目的就是看新样子)
-          showTab('preview');
+          // 直接切到预览看结果(AI-only 面板没有预览,只刷新状态)
+          if (preview) showTab('preview');
           if (window.OCApp && window.OCApp.toast) window.OCApp.toast('已按你的要求改写，可随时撤销');
         })
         .catch((err) => {
@@ -399,24 +438,28 @@
     }
     askForm.addEventListener('submit', (e) => { e.preventDefault(); sendAsk(); });
 
-    refreshToolbar(block, panel, block.getAttribute('data-lang'));
+    refreshToolbar(block, panel, langAttr, preview);
   }
 
-  // 给容器里所有可预览的代码块挂面板。R.enhance 每次重绘都会调用,已挂过的跳过
+  // 给容器里所有可挂面板的代码块挂面板。R.enhance 每次重绘都会调用,已挂过的跳过
   // (面板是代码块的子节点,重绘后随 DOM 一起丢弃,所以只需要防同一次内的重复调用)。
   P.enhance = function (container) {
     if (!container || !container.querySelectorAll) return;
     container.querySelectorAll('.code-block').forEach((block) => {
       if (block.dataset.prevMounted === '1') return;
+      const langRaw = String(block.getAttribute('data-lang') || '');
       let kind = P.kindOf(block);
-      if (!kind) {
-        const lang = String(block.getAttribute('data-lang') || '').toLowerCase();
-        if (lang && lang !== 'text' && lang !== 'plaintext') return;
-        if (!P.looksLikeMarkup(codeOf(block))) return;
+      if (!kind && P.looksLikeMarkup(codeOf(block))) {
         const head = codeOf(block).slice(0, 400);
         kind = (/<svg[\s>]/i.test(head) && !/<html[\s>]|<!doctype/i.test(head)) ? 'svg' : 'html';
       }
-      mount(block, kind);
+      if (kind) { mount(block, kind, langRaw); return; }
+      // 非预览语言:只挂「让 AI 改」。纯文本/渲染指令没有改写意义;
+      // 太短的片段(不足 3 行)也没有 —— 模型回一句还不如自己改
+      const lang = langRaw.trim().toLowerCase().split(/\s+/)[0];
+      if (!aiEligible(lang)) return;
+      if (codeOf(block).trimEnd().split('\n').length < 3) return;
+      mount(block, null, lang);
     });
   };
 

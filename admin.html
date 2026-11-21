@@ -9,16 +9,16 @@
 <meta name="robots" content="noindex,nofollow">
 <link rel="icon" type="image/svg+xml" href="./logo-icon.svg">
 <link rel="apple-touch-icon" href="./static/logo/app-icon-192.png">
-<link rel="stylesheet" href="./static/css/style.min.css?v=2.3.3">
-<link rel="stylesheet" href="./vendor/highlight/github.min.css?v=2.3.3" id="hljs-theme">
-<link rel="stylesheet" href="./vendor/katex/katex.min.css?v=2.3.3">
-<link rel="stylesheet" href="./static/css/enhanced.min.css?v=2.3.3">
-<link rel="stylesheet" href="./static/css/refine.min.css?v=2.3.3">
-<link rel="stylesheet" href="./static/css/redesign.min.css?v=2.3.3">
-<link rel="stylesheet" href="./static/css/polish.min.css?v=2.3.3">
-<link rel="stylesheet" href="./static/css/markdown.min.css?v=2.3.3">
-<link rel="stylesheet" href="./static/css/chrome.min.css?v=2.3.3">
-<script src="./static/js/theme-boot.min.js?v=2.3.3"></script>
+<link rel="stylesheet" href="./static/css/style.min.css?v=2.4.0">
+<link rel="stylesheet" href="./vendor/highlight/github.min.css?v=2.4.0" id="hljs-theme">
+<link rel="stylesheet" href="./vendor/katex/katex.min.css?v=2.4.0">
+<link rel="stylesheet" href="./static/css/enhanced.min.css?v=2.4.0">
+<link rel="stylesheet" href="./static/css/refine.min.css?v=2.4.0">
+<link rel="stylesheet" href="./static/css/redesign.min.css?v=2.4.0">
+<link rel="stylesheet" href="./static/css/polish.min.css?v=2.4.0">
+<link rel="stylesheet" href="./static/css/markdown.min.css?v=2.4.0">
+<link rel="stylesheet" href="./static/css/chrome.min.css?v=2.4.0">
+<script src="./static/js/theme-boot.min.js?v=2.4.0"></script>
 </head>
 <body class="admin-body">
 <form id="admin-fields" autocomplete="off" style="display:contents">
@@ -91,10 +91,13 @@
     <div class="admin-card">
       <div class="admin-panel-head"><div><h2>用量分析</h2><p class="muted small">近 14 天调用趋势、用户用量、模型评价与额度排行。</p></div><button class="btn small" id="usage-export" type="button">导出明细 CSV</button></div>
       <div class="admin-panel-head" style="margin-bottom:8px"><div></div>
-        <div class="ins-range" id="ins-range">
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn small" id="ins-export" type="button">导出看板 CSV</button>
+          <div class="ins-range" id="ins-range">
           <button class="btn small active" data-days="7" type="button">7 天</button>
           <button class="btn small" data-days="14" type="button">14 天</button>
           <button class="btn small" data-days="30" type="button">30 天</button>
+          </div>
         </div>
       </div>
       <div class="admin-grid" id="ins-summary"></div>
@@ -1368,17 +1371,17 @@
   </div>
 </div>
 </form>
-<script defer src="./static/js/config.min.js?v=2.3.3"></script>
-<script defer src="./static/js/icons.min.js?v=2.3.3"></script>
-<script defer src="./vendor/markdown-it/markdown-it.min.js?v=2.3.3"></script>
-<script defer src="./vendor/markdown-it/markdown-it-footnote.min.js?v=2.3.3"></script>
-<script defer src="./vendor/markdown-it/markdown-it-emoji.min.js?v=2.3.3"></script>
-<script defer src="./vendor/dompurify/purify.min.js?v=2.3.3"></script>
-<script defer src="./vendor/katex/katex.min.js?v=2.3.3"></script>
-<script defer src="./vendor/highlight/highlight.min.js?v=2.3.3"></script>
-<script defer src="./static/js/ui.min.js?v=2.3.3"></script>
-<script defer src="./static/js/components.min.js?v=2.3.3"></script>
-<script defer src="./static/js/renderer.min.js?v=2.3.3"></script>
-<script defer src="./static/js/admin.min.js?v=2.3.3"></script>
+<script defer src="./static/js/config.min.js?v=2.4.0"></script>
+<script defer src="./static/js/icons.min.js?v=2.4.0"></script>
+<script defer src="./vendor/markdown-it/markdown-it.min.js?v=2.4.0"></script>
+<script defer src="./vendor/markdown-it/markdown-it-footnote.min.js?v=2.4.0"></script>
+<script defer src="./vendor/markdown-it/markdown-it-emoji.min.js?v=2.4.0"></script>
+<script defer src="./vendor/dompurify/purify.min.js?v=2.4.0"></script>
+<script defer src="./vendor/katex/katex.min.js?v=2.4.0"></script>
+<script defer src="./vendor/highlight/highlight.min.js?v=2.4.0"></script>
+<script defer src="./static/js/ui.min.js?v=2.4.0"></script>
+<script defer src="./static/js/components.min.js?v=2.4.0"></script>
+<script defer src="./static/js/renderer.min.js?v=2.4.0"></script>
+<script defer src="./static/js/admin.min.js?v=2.4.0"></script>
 </body>
 </html>

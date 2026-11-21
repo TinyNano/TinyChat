@@ -7,9 +7,11 @@
  *   - 语义搜索解决「记得意思、想找到相关的那几条」。两者互不替代:纯向量检索对精确
  *     术语/代码片段召回并不好,所以 openai-chat 的会话搜索仍然是 FTS5,语义结果只作补充。
  *
- * 存储:向量按用户存在 data/vectors/{uid}.json(与 captcha / web 的 cookie jar 同一惯例:
- * 每用户一个文件,写时 flock)。不放进主库的原因是主库里的一切都随「同步」全量重写,
- * 而向量只增不改、体积大。条目数有上限(默认 400),超了就按最近使用淘汰。
+ * 存储:主库存 SQLite 表 semantic_vec(uid/kind/id/h/text/v/t),写入按事务整组替换 ——
+ * 旧方案(每用户一个 JSON 文件、每次索引全量读写)在真实 embeddings 的 1536 维下
+ * 是每用户约 5MB 的 JSON 反复解析,规模一上来就疼。旧 JSON 文件首次遇到时自动迁入表
+ * 并改名为 .migrated 保留备份;主机没有可用 SQLite 时退回文件方案。
+ * 条目数有上限(默认 400),超了就按最近使用淘汰。
  *
  * 计算:向量已归一化,余弦相似度退化成点积,PHP 端对几百条 × 几百维足够快,
  * 不需要装任何扩展。
@@ -32,7 +34,65 @@ function tc_vec_file($userId) {
     return tc_vec_dir() . '/' . preg_replace('/[^A-Za-z0-9_-]/', '_', (string) $userId) . '.json';
 }
 
+// 向量表:与 chat_search(FTS5)同一个 SQLite 库。普通表不依赖 FTS5,任何 SQLite 都能建。
+function tc_vec_sqlite_ready() {
+    static $ready = null;
+    if ($ready !== null) return $ready;
+    $ready = false;
+    try {
+        $pdo = tc_db();
+        $pdo->exec('CREATE TABLE IF NOT EXISTS semantic_vec (uid TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, h TEXT NOT NULL, text TEXT NOT NULL, v TEXT NOT NULL, t INTEGER NOT NULL, PRIMARY KEY (uid, kind, id))');
+        $ready = true;
+    } catch (Throwable $e) {
+        $ready = false;   // 没有可用的 SQLite:退回文件方案
+    }
+    return $ready;
+}
+
+// 旧 JSON 文件迁入表:只在该用户表为空时执行一次,迁完把文件改名保留备份。
+// 迁移写失败时不改名 —— 下次再试,文件方案与新表互不覆盖。
+function tc_vec_migrate_legacy($userId, $pdo) {
+    $file = tc_vec_file($userId);
+    if (!is_file($file)) return;
+    $cnt = (int) $pdo->query('SELECT COUNT(*) FROM semantic_vec WHERE uid = ' . $pdo->quote((string) $userId))->fetchColumn();
+    if ($cnt === 0) {
+        $j = json_decode((string) @file_get_contents($file), true);
+        if (is_array($j) && $j) {
+            $st = $pdo->prepare('INSERT OR REPLACE INTO semantic_vec (uid, kind, id, h, text, v, t) VALUES (?,?,?,?,?,?,?)');
+            foreach ($j as $it) {
+                if (!is_array($it) || empty($it['id']) || empty($it['v'])) continue;
+                $st->execute(array(
+                    (string) $userId,
+                    (string) (isset($it['kind']) ? $it['kind'] : 'notes'),
+                    (string) $it['id'],
+                    (string) (isset($it['h']) ? $it['h'] : ''),
+                    (string) (isset($it['text']) ? $it['text'] : ''),
+                    tc_json_encode($it['v']),
+                    (int) (isset($it['t']) ? $it['t'] : 0),
+                ));
+            }
+        }
+    }
+    @rename($file, $file . '.migrated');
+}
+
+// 读取向量条目(条目形状与旧方案一致: [{kind,id,h,text,v,t}])。SQLite 不可用时退回文件。
 function tc_vec_load($userId) {
+    if (tc_vec_sqlite_ready()) {
+        try {
+            $pdo = tc_db();
+            tc_vec_migrate_legacy($userId, $pdo);
+            $st = $pdo->prepare('SELECT kind, id, h, text, v, t FROM semantic_vec WHERE uid = ?');
+            $st->execute(array((string) $userId));
+            $out = array();
+            foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $v = json_decode((string) $r['v'], true);
+                if (!is_array($v)) continue;
+                $out[] = array('kind' => (string) $r['kind'], 'id' => (string) $r['id'], 'h' => (string) $r['h'], 'text' => (string) $r['text'], 'v' => $v, 't' => (int) $r['t']);
+            }
+            return $out;
+        } catch (Throwable $e) { /* 落到文件方案 */ }
+    }
     $file = tc_vec_file($userId);
     if (!is_file($file)) return array();
     $raw = @file_get_contents($file);
@@ -40,9 +100,37 @@ function tc_vec_load($userId) {
     return is_array($j) ? $j : array();
 }
 
-// 写回向量文件。先写临时文件再 rename:进程被中断时不会留下半截 JSON
-// (半截 JSON 读出来是空数组,用户下次搜索会以为「什么都没索引」)。
+// 写回向量条目:单事务整组替换(约 400 行,本地 SQLite 毫秒级)。
+// 旧方案用「临时文件 + rename」防半截;表方案由事务保证原子。
+// SQLite 不可用时退回文件(临时文件 + rename,同样防半截 JSON)。
 function tc_vec_save($userId, $items) {
+    if (tc_vec_sqlite_ready()) {
+        $own = false;
+        try {
+            $pdo = tc_db();
+            $own = !$pdo->inTransaction();
+            if ($own) $pdo->beginTransaction();
+            $pdo->prepare('DELETE FROM semantic_vec WHERE uid = ?')->execute(array((string) $userId));
+            $st = $pdo->prepare('INSERT OR REPLACE INTO semantic_vec (uid, kind, id, h, text, v, t) VALUES (?,?,?,?,?,?,?)');
+            foreach ($items as $it) {
+                if (!is_array($it) || empty($it['id']) || empty($it['v'])) continue;
+                $st->execute(array(
+                    (string) $userId,
+                    (string) (isset($it['kind']) ? $it['kind'] : 'notes'),
+                    (string) $it['id'],
+                    (string) (isset($it['h']) ? $it['h'] : ''),
+                    (string) (isset($it['text']) ? $it['text'] : ''),
+                    tc_json_encode(isset($it['v']) ? $it['v'] : array()),
+                    (int) (isset($it['t']) ? $it['t'] : 0),
+                ));
+            }
+            if ($own) $pdo->commit();
+            return true;
+        } catch (Throwable $e) {
+            try { if ($own && isset($pdo) && $pdo->inTransaction()) $pdo->rollBack(); } catch (Throwable $e2) { /* 忽略 */ }
+            /* 落到文件方案 */
+        }
+    }
     $file = tc_vec_file($userId);
     $tmp = $file . '.' . getmypid() . '.tmp';
     $ok = @file_put_contents($tmp, tc_json_encode($items), LOCK_EX);
@@ -230,7 +318,6 @@ function tc_api_me_semantic_stats() {
     tc_with_db(false, function ($db) {
         $user = tc_require_auth($db);
         $cfg = tc_semantic_settings($db);
-        $file = tc_vec_file($user['id']);
         $items = $cfg['enabled'] ? tc_vec_load($user['id']) : array();
         $byKind = array('notes' => 0, 'chats' => 0);
         $last = 0;
@@ -246,7 +333,8 @@ function tc_api_me_semantic_stats() {
             'model' => $cfg['model'],
             'items' => count($items),
             'byKind' => $byKind,
-            'bytes' => is_file($file) ? (int) @filesize($file) : 0,
+            // 占用估算:向量 JSON 串 + 文本 + 固定开销(文件方案时代是文件大小,表方案按行算)
+            'bytes' => array_sum(array_map(function ($it) { return isset($it['v']) ? strlen(tc_json_encode($it['v'])) + strlen((string) (isset($it['text']) ? $it['text'] : '')) + 40 : 0; }, $items)),
             'updatedAt' => $last,
         ));
     });
@@ -256,9 +344,16 @@ function tc_api_me_semantic_stats() {
 function tc_api_me_semantic_clear() {
     tc_with_db(false, function ($db) {
         $user = tc_require_auth($db);
+        $items = tc_vec_load($user['id']);
+        $freed = array_sum(array_map(function ($it) { return isset($it['v']) ? strlen(tc_json_encode($it['v'])) + strlen((string) (isset($it['text']) ? $it['text'] : '')) + 40 : 0; }, $items));
+        if (tc_vec_sqlite_ready()) {
+            try { tc_db()->prepare('DELETE FROM semantic_vec WHERE uid = ?')->execute(array((string) $user['id'])); } catch (Throwable $e) { /* 文件方案兜底 */ }
+        }
         $file = tc_vec_file($user['id']);
-        $freed = is_file($file) ? (int) @filesize($file) : 0;
-        if (is_file($file)) @unlink($file);
+        if (is_file($file)) { $freed += (int) @filesize($file); @unlink($file); }
+        // 迁移备份一并清掉,别让「清空」留下半份副本
+        $mig = $file . '.migrated';
+        if (is_file($mig)) @unlink($mig);
         tc_json(200, array('ok' => true, 'freedBytes' => $freed));
     });
 }

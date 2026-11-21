@@ -158,6 +158,11 @@ await page.addInitScript(([token, uid, stamp, pid]) => {
       messages: [{ role: 'user', content: '很久以前的问题', createdAt: stamp }, { role: 'assistant', content: '很久以前的回答', model: 'm', createdAt: stamp }],
     },
     {
+      id: 'arch2', title: '第二份归档', createdAt: stamp - 86400000, updatedAt: stamp - 86400000,
+      archived: true, archivedAt: stamp,
+      messages: [{ role: 'user', content: '旧问题二', createdAt: stamp }, { role: 'assistant', content: '旧回答二', model: 'm', createdAt: stamp }],
+    },
+    {
       id: 'draft1', title: '草稿会话', createdAt: stamp, updatedAt: stamp,
       draft: { text: '这是没发出去的草稿', attachments: [] },
       messages: [{ role: 'user', content: '草稿那一轮的提问', createdAt: stamp }, { role: 'assistant', content: '草稿那一轮的回答', model: 'm', createdAt: stamp }],
@@ -176,6 +181,8 @@ await page.addInitScript(([token, uid, stamp, pid]) => {
           toolCalls: [{ id: 'call_gui_1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"上海"}' } }],
         },
         { role: 'tool', tool_call_id: 'call_gui_1', content: '{"temp":26,"text":"晴"}', createdAt: stamp },
+        { role: 'user', content: '写个加法函数', createdAt: stamp },
+        { role: 'assistant', content: '好的：\n\n```js\nfunction add(a, b) {\n  return a + b;\n}\n```\n', model: 'mock-model', createdAt: stamp },
       ],
     },
   ]));
@@ -414,7 +421,17 @@ check('打开归档会话后自动取消归档', await page.evaluate(() => {
   return !!c && !c.archived;
 }));
 
+// 批量取消归档:分组标题上的按钮一次放回整组(arch1 已被点开反悔,arch2 还在组里)
+await page.evaluate(() => { const b = document.querySelector('.chat-group-unarch'); if (b) b.click(); });
+await sleep(500);
+check('批量取消归档生效', await page.evaluate(() => {
+  const c = (window.OCApp.state.chats || []).find((x) => x.id === 'arch2');
+  return !!c && !c.archived;
+}));
+
 console.log('== 6. 跨会话草稿 ==');
+check('侧栏会话行有草稿圆点', (await page.$$('.chat-draft-dot')).length >= 1);
+
 await page.evaluate(() => {
   const it = Array.from(document.querySelectorAll('.chat-item')).find((x) => x.innerText.indexOf('草稿会话') >= 0);
   if (it) it.click();
@@ -509,6 +526,17 @@ await page.evaluate(() => { const a = document.getElementById('chat-area'); a.sc
 await sleep(400);
 const mid = await page.evaluate(() => { const t = document.querySelector('.chat-toc-track'); return t ? t.style.getPropertyValue('--toc-start') : ''; });
 check('滚动后轨道起点随之前移', mid !== tocInfo.start && parseFloat(mid) > 0, tocInfo.start + ' -> ' + mid);
+// 轨道点击跳段:回到顶部,点轨道中点,应落在内容中部
+const jump = await page.evaluate(() => {
+  const area = document.getElementById('chat-area');
+  const track = document.querySelector('.chat-toc-track');
+  if (!area || !track) return null;
+  area.scrollTop = 0;
+  const rect = track.getBoundingClientRect();
+  track.dispatchEvent(new MouseEvent('click', { clientY: rect.top + rect.height / 2, bubbles: true }));
+  return { top: area.scrollTop, max: area.scrollHeight - area.clientHeight };
+});
+check('点击轨道跳到内容中部', !!jump && jump.top > jump.max * 0.3 && jump.top < jump.max * 0.7, JSON.stringify(jump));
 
 console.log('== 9. 代码块「让 AI 改」==');
 // 回到代码块那条会话,取第一块 HTML 代码
@@ -696,6 +724,68 @@ check('SVG 块独立回退,HTML 块修订保持', indep.afterUndoSvg[1].code.ind
 await page.evaluate(() => document.querySelectorAll('.msg.assistant .code-block')[0].querySelector('[data-act="undo-ai"]').click());
 await sleep(300);
 
+console.log('== 10. 非预览语言的「让 AI 改」与迭代链 ==');
+// JS 块没有预览能力,但挂了 AI-only 面板:表头按钮直接是「让 AI 改」,面板里没有标签页
+const jsInfo = await page.evaluate(() => {
+  const blocks = document.querySelectorAll('.msg.assistant .code-block');
+  const block = blocks[blocks.length - 1];
+  if (!block) return null;
+  return {
+    lang: block.getAttribute('data-lang'),
+    toggle: !!block.querySelector('.code-ai-toggle'),
+    previewToggle: !!block.querySelector('.code-prev-toggle:not(.code-ai-toggle)'),
+    tabs: block.querySelectorAll('.cpp-tab').length,
+    frameWrap: !!block.querySelector('.cpp-frame-wrap'),
+    askHidden: block.querySelector('[data-act="ask-ai"]').classList.contains('hidden'),
+  };
+});
+check('JS 块挂的是 AI-only 面板(无预览标签/无 iframe)', !!jsInfo && jsInfo.lang === 'js' && jsInfo.toggle && !jsInfo.previewToggle && jsInfo.tabs === 0 && !jsInfo.frameWrap, JSON.stringify(jsInfo));
+check('JS 块的改写入口可见', !!jsInfo && !jsInfo.askHidden);
+// 捕获改写请求体:第二轮必须带上第一轮的指令(迭代链)
+let rewriteBodies = [];
+await page.route('**/api/proxy/chat*', (route) => {
+  try { const b = route.request().postDataJSON(); if (b && b._purpose === 'rewrite') rewriteBodies.push(b); } catch (e) {}
+  return route.continue();
+});
+const jsFlow = await (async () => {
+  const ask = async (text) => {
+    await page.evaluate((t) => {
+      const blocks = document.querySelectorAll('.msg.assistant .code-block');
+      const block = blocks[blocks.length - 1];
+      if (block.querySelector('.code-prev-panel').classList.contains('hidden')) block.querySelector('.code-ai-toggle').click();
+      if (block.querySelector('.cpp-ask').classList.contains('hidden')) block.querySelector('[data-act="ask-ai"]').click();
+      const input = block.querySelector('.cpp-ask-input');
+      input.value = t;
+      block.querySelector('.cpp-ask').requestSubmit();
+    }, text);
+    await sleep(1600);
+  };
+  const snap = () => page.evaluate(() => {
+    const blocks = document.querySelectorAll('.msg.assistant .code-block');
+    const b = blocks[blocks.length - 1];
+    return { code: b.querySelector('pre code').textContent.slice(0, 80), ver: b.querySelector('.cpp-ver').textContent };
+  });
+  const before = await snap();
+  await ask('第一轮：把函数名改成 sub');
+  const after1 = await snap();
+  await ask('第二轮：再加一行注释');
+  const after2 = await snap();
+  const undoOnce = async () => {
+    await page.evaluate(() => document.querySelectorAll('.msg.assistant .code-block')[document.querySelectorAll('.msg.assistant .code-block').length - 1].querySelector('[data-act="undo-ai"]').click());
+    await sleep(300);
+  };
+  await undoOnce();
+  const undone1 = await snap();   // 退一版 = 第一轮改写的结果
+  await undoOnce();
+  const undone = await snap();    // 再退一版 = 模型原版
+  return { before, after1, after2, undone1, undone, bodies: rewriteBodies.map((b) => (b.messages || []).map((m) => m.content).join('|')) };
+})();
+check('JS 块改写生效(原地替换,修订 v2)', jsFlow.after1.code.indexOf('REWRITTEN') >= 0 && /修订 v2/.test(jsFlow.after1.ver), JSON.stringify(jsFlow.after1));
+check('第二轮改写生效(修订 v3)', jsFlow.after2.ver === '修订 v3' || /修订 v3/.test(jsFlow.after2.ver), JSON.stringify(jsFlow.after2));
+check('退一版回到第一轮结果', jsFlow.undone1.code.indexOf('REWRITTEN') >= 0 && jsFlow.undone1.code.indexOf('REWRITTEN-2') < 0 && /修订 v2/.test(jsFlow.undone1.ver), JSON.stringify(jsFlow.undone1));
+check('再退一版回到改写前', jsFlow.undone.code === jsFlow.before.code && jsFlow.undone.ver === '', JSON.stringify(jsFlow.undone));
+check('首轮请求不带迭代链', jsFlow.bodies.length >= 1 && jsFlow.bodies[0].indexOf('Instructions already applied') < 0, JSON.stringify(jsFlow.bodies[0] || '').slice(0, 120));
+check('第二轮请求带上了第一轮指令', jsFlow.bodies.length >= 2 && jsFlow.bodies[1].indexOf('Instructions already applied') >= 0 && jsFlow.bodies[1].indexOf('第一轮') >= 0, JSON.stringify(jsFlow.bodies[1] || '').slice(0, 160));
 // 预览页里的样例脚本会尝试读 localStorage:被沙箱挡住是预期结果(这正是隔离在起作用),
 // 浏览器把它记成 pageerror。只排除这一条,其它异常仍然算失败。
 const realErrors = pageErrors.filter((e) => e.indexOf("The document is sandboxed and lacks the 'allow-same-origin' flag") < 0);

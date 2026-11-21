@@ -309,6 +309,78 @@ if (is_array($body) && isset($body['model']) && $body['model'] === 'mock-archive
 // 工具调用按请求模型开关:mock-tool-stream 的流式回复只下发 tool_calls 分片(与真实上游一致:
 // 先 id/name、后 arguments 分片、最后 finish_reason=tool_calls),用于验证透传不丢字段。
 $toolModel = is_array($body) && isset($body['model']) ? (string) $body['model'] : '';
+
+// 代码块改写的「改什么」决策(与上游格式无关):chat 与 anthropic 两条路径共用。
+//   [bad]  → 只回一句说明、不给代码(校验「没有新代码」不会被当成成功)
+//   [same] → 原样返回原代码(宽松比较也不该通过)
+//   [v2]   → 第二轮改写的 HTML(REWRITTEN2,内容与第一轮不同)
+//   [svg]  → SVG 围栏(REWRITTEN-SVG,专供 SVG 块独立性测试)
+//   其它   → 按请求里的语言返回同语言围栏,内容加上 REWRITTEN 标记
+//   (html 分支保持 REWRITTEN 标题的旧形状,既有断言都认它)
+if (!function_exists('tc_mock_rewrite_content')) {
+    function tc_mock_rewrite_content($prompt) {
+        $cur = '';
+        $lang = 'html';
+        if (preg_match('/Current code:\s*```([^\n]*)\n([\s\S]*?)\n```/', $prompt, $mm)) {
+            $lang = strtolower(trim((string) $mm[1]));
+            $cur = (string) $mm[2];
+        }
+        if (strpos($prompt, '[bad]') !== false) return '抱歉，我看不出你想改哪一部分。';
+        if (strpos($prompt, '[same]') !== false) return "```" . $lang . "\n" . $cur . "\n```";
+        if (strpos($prompt, '[svg]') !== false) {
+            return "```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\"><rect width=\"80\" height=\"40\" fill=\"#ff3b30\"/><text x=\"6\" y=\"24\" fill=\"#fff\" font-size=\"10\">REWRITTEN-SVG</text></svg>\n```";
+        }
+        if (strpos($prompt, 'REWRITTEN-ANT') !== false) {
+            // e2e 的 anthropic 用例:回显指令里的标记,证明指令完整流经 system/messages
+            return "```html\n<!doctype html>\n<html><body><h1 id=\"hello\">REWRITTEN-ANT</h1></body></html>\n```";
+        }
+        if (strpos($prompt, '[v2]') !== false) {
+            return "```html\n<!doctype html>\n<html><body><h1 id=\"hello\">REWRITTEN2</h1></body></html>\n```";
+        }
+        if ($lang !== '' && $lang !== 'html') {
+            // 非预览语言:同语言围栏 + 标记注释。第二轮(代码里已有标记)换成
+            // REWRITTEN-2,让「内容变了」成立 —— 前端对原样返回会按「没改成」拦下
+            $second = strpos($cur, '/* REWRITTEN */') !== false;
+            $cur = preg_replace('/^\/\* REWRITTEN(-2)? \*\/\n/', '', $cur);
+            return "```" . $lang . "\n/* REWRITTEN" . ($second ? '-2' : '') . " */\n" . $cur . "\n```";
+        }
+        return "```html\n<!doctype html>\n<html><body><h1 id=\"hello\">REWRITTEN</h1></body></html>\n```";
+    }
+    function tc_mock_rewrite_prompt($body) {
+        $prompt = '';
+        if (is_array($body)) {
+            foreach ((array) (isset($body['messages']) ? $body['messages'] : array()) as $m) {
+                if (is_array($m) && isset($m['role']) && $m['role'] === 'user') $prompt .= (string) $m['content'];
+            }
+            if (isset($body['prompt'])) $prompt .= (string) $body['prompt'];
+            if (isset($body['input']) && is_string($body['input'])) $prompt .= $body['input'];
+            if (isset($body['system']) && is_string($body['system'])) $prompt .= $body['system'];
+        }
+        return $prompt;
+    }
+}
+// Anthropic 兼容端点(/v1/messages):改写请求走 anthropic 格式供应商时用。
+// 挂在 chat 路径之前 —— URI 与 chat/completions 不重叠,顺序只为可读。
+if (strpos($uri, '/v1/messages') !== false || strpos($uri, '/messages') !== false) {
+    $prompt = tc_mock_rewrite_prompt($body);
+    $model = is_array($body) && isset($body['model']) ? (string) $body['model'] : '';
+    if (strpos($prompt, 'front-end code editor') !== false || $model === 'mock-rewrite') {
+        echo json_encode(array(
+            'id' => 'mock-ant', 'type' => 'message', 'role' => 'assistant', 'model' => 'mock-rewrite',
+            'content' => array(array('type' => 'text', 'text' => tc_mock_rewrite_content($prompt))),
+            'stop_reason' => 'end_turn',
+            'usage' => array('input_tokens' => 120, 'output_tokens' => 60),
+        ), JSON_UNESCAPED_UNICODE);
+        return;
+    }
+    echo json_encode(array(
+        'id' => 'mock-ant', 'type' => 'message', 'role' => 'assistant', 'model' => 'mock-model',
+        'content' => array(array('type' => 'text', 'text' => 'MOCK-ANTHROPIC-REPLY')),
+        'stop_reason' => 'end_turn',
+        'usage' => array('input_tokens' => 10, 'output_tokens' => 5),
+    ), JSON_UNESCAPED_UNICODE);
+    return;
+}
 if ($toolModel === 'mock-tool-stream' || $toolModel === 'mock-tool-call') {
     if (!empty($body['stream'])) {
         header('Content-Type: text/event-stream');
@@ -342,38 +414,11 @@ if ($toolModel === 'mock-tool-stream' || $toolModel === 'mock-tool-call') {
     ), JSON_UNESCAPED_UNICODE);
     return;
 }
-// 代码块改写(mock-rewrite):按提示词里出现的标记决定「怎么改」,供预览的「让 AI 改」回归。
-// 模型名本身固定,所以改写内容只能由请求里的指令驱动:
-//   [bad]  → 只回一句说明、不给代码(校验「没有新代码」不会被当成成功)
-//   [same] → 原样返回原代码(同上,宽松比较也不该通过)
-//   其它   → 返回改过的页面(带上 REWRITTEN 标记)
+// 代码块改写(mock-rewrite):chat 格式路径；决策逻辑与 anthropic 路径共用(见文件头部的 tc_mock_rewrite_content)。
 if ($toolModel === 'mock-rewrite') {
-    $prompt = '';
-    if (is_array($body)) {
-        foreach ((array) (isset($body['messages']) ? $body['messages'] : array()) as $m) {
-            if (is_array($m) && isset($m['role']) && $m['role'] === 'user') $prompt .= (string) $m['content'];
-        }
-        if (isset($body['prompt'])) $prompt .= (string) $body['prompt'];
-        if (isset($body['input']) && is_string($body['input'])) $prompt .= $body['input'];
-    }
-    $cur = "";
-    if (preg_match('/Current code:\s*```[^\n]*\n([\s\S]*?)\n```/', $prompt, $mm)) $cur = $mm[1];
-    if (strpos($prompt, '[bad]') !== false) {
-        $content = '抱歉，我看不出你想改哪一部分。';
-    } elseif (strpos($prompt, '[same]') !== false) {
-        $content = "```html\n" . $cur . "\n```";
-    } elseif (strpos($prompt, '[v2]') !== false) {
-        // 第二轮改写:内容必须与第一轮不同,否则前端「没有新代码」的判定会拦下
-        $content = "```html\n<!doctype html>\n<html><body><h1 id=\"hello\">REWRITTEN2</h1></body></html>\n```";
-    } elseif (strpos($prompt, '[svg]') !== false) {
-        // SVG 块的改写:返回 svg 围栏,extractCode 按「同语言优先」取到它
-        $content = "```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\"><rect width=\"80\" height=\"40\" fill=\"#ff3b30\"/><text x=\"6\" y=\"24\" fill=\"#fff\" font-size=\"10\">REWRITTEN-SVG</text></svg>\n```";
-    } else {
-        $content = "```html\n<!doctype html>\n<html><body><h1 id=\"hello\">REWRITTEN</h1></body></html>\n```";
-    }
     echo json_encode(array(
         'id' => 'mock-rewrite', 'object' => 'chat.completion', 'model' => 'mock-rewrite',
-        'choices' => array(array('index' => 0, 'message' => array('role' => 'assistant', 'content' => $content), 'finish_reason' => 'stop')),
+        'choices' => array(array('index' => 0, 'message' => array('role' => 'assistant', 'content' => tc_mock_rewrite_content(tc_mock_rewrite_prompt($body))), 'finish_reason' => 'stop')),
         'usage' => array('prompt_tokens' => 120, 'completion_tokens' => 60),
     ), JSON_UNESCAPED_UNICODE);
     return;

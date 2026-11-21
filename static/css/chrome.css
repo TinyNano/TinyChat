@@ -6414,3 +6414,32 @@ body.admin-body { overflow: visible !important; }
     font-size: 16px !important;
   }
 }
+
+/* 17c-3. 改写面板补件(v2.4.0) ---------- */
+/* 草稿指示:侧栏会话行上的小圆点,表示这条会话有没发出去的输入 */
+.chat-draft-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+  margin-left: 6px;
+}
+/* 归档组标题上的批量按钮 */
+.chat-group-unarch {
+  margin-left: 8px;
+  font-size: 0.786rem;
+  color: var(--text-tertiary);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  padding: 1px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chat-group-unarch:hover { color: var(--text); background: var(--bg-hover); }
+/* AI-only 改写面板(非预览语言):没有标签页,给个文字标头 */
+.cpp-ai-label { font-size: 0.857rem; color: var(--text-secondary); font-weight: 500; }
+/* 回答还在流式输出时不提供改写:对着半截代码发起改写,结果只会基于已生成部分 */
+.oc-streaming .code-prev-panel [data-act="ask-ai"],
+.oc-streaming .code-prev-panel .cpp-ask { display: none !important; }

@@ -611,12 +611,40 @@ async function purgeDeletedChats(payload, confirmMsg) {
 document.addEventListener('click', (e) => {
   const b = e.target.closest('#ins-range button');
   if (b) loadInsights(Number(b.dataset.days));
+  if (e.target.closest('#ins-export')) exportInsightsCsv();
 });
 
 // 用量看板:按天 / 模型 / 用户的消耗聚合 + 额度概览。
 // 数据来自 /api/admin/insights(见 lib/insights.php),与 loadStats 的「调用次数」口径互补 ——
 // 调用次数看不出钱花在谁身上、花在哪个模型上,这里补的就是那一层。
 let INS_DAYS = 7;
+let insData = null;   // 最近一次成功加载的看板数据(CSV 导出用)
+// 看板 CSV 导出:三个维度(按天 / 按模型 / 按用户)各一段,BOM 头让 Excel 认出 UTF-8。
+// 从前端已有数据出,不再开服务端接口 —— 同一份数据、少一条路由。
+function exportInsightsCsv() {
+  if (!insData) return;
+  const esc = (v) => {
+    const t = String(v == null ? '' : v);
+    return /["\r\n,]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  };
+  const row = (cells) => cells.map(esc).join(',');
+  const usage = insData.usage || {};
+  const quota = insData.quota || {};
+  const lines = [];
+  lines.push(row(['区间', INS_DAYS + ' 天']), '');
+  lines.push(row(['按天', '', '', '', '']), row(['日期', '调用次数', '消耗额度', '输入 Token', '输出 Token']));
+  (usage.series || []).forEach((x) => lines.push(row([x.day, x.calls, Number(x.cost || 0).toFixed(4), x.prompt, x.completion])));
+  lines.push('', row(['按模型', '', '']), row(['模型', '调用次数', '消耗额度']));
+  (usage.models || []).forEach((x) => lines.push(row([x.model, x.calls, Number(x.cost || 0).toFixed(4)])));
+  lines.push('', row(['按用户', '', '']), row(['用户', '调用次数', '消耗额度']));
+  (usage.users || []).forEach((x) => lines.push(row([x.name || x.id, x.calls, Number(x.cost || 0).toFixed(4)])));
+  lines.push('', row(['额度侧', '', '']), row(['已发', '剩余', '快用完账号数']));
+  lines.push(row([Number(quota.issued || 0).toFixed(2), Number(quota.remaining || 0).toFixed(2), quota.lowCount || 0]));
+  lines.push('', row(['快用完的账号']), row(['用户', '剩余额度']));
+  (quota.lowUsers || []).forEach((x) => lines.push(row([x.name || x.id, x.quota])));
+  // BOM 头:Excel 打开 CSV 时按它认出 UTF-8,中文列名才不会变成乱码
+  window.OCUI.download('用量看板-' + INS_DAYS + '天.csv', '﻿' + lines.join('\r\n'), 'text/csv');
+}
 async function loadInsights(days) {
   INS_DAYS = [7, 14, 30].includes(Number(days)) ? Number(days) : INS_DAYS;
   document.querySelectorAll('#ins-range button').forEach((b) => b.classList.toggle('active', Number(b.dataset.days) === INS_DAYS));
@@ -633,6 +661,7 @@ async function loadInsights(days) {
   const usage = d.usage || {};
   const total = usage.total || {};
   const quota = d.quota || {};
+  insData = d;   // 「导出看板 CSV」用最新一份
   const sum = $('ins-summary');
   if (sum) {
     const cell = (label, value, sub) => '<div class="stat-cell"><div class="stat-label">' + label + '</div>'

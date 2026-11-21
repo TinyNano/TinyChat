@@ -1326,6 +1326,21 @@ function renderChatList() {
       saveChats(); renderChatList();
       toast(was ? '已取消归档「' + (live.title || '新对话') + '」' : '已归档「' + (live.title || '新对话') + '」，仍可在搜索里找到');
     },
+    // 「已归档」分组标题上的批量按钮:整理完旧对话后一个个点开反悔太笨,
+    // 一次把整组放回时间分组(逐条走同一个 liveChat 路径,置顶状态照旧清理)
+    onUnarchiveAll: (list) => {
+      let n = 0;
+      (list || []).forEach((c) => {
+        const live = liveChat(c);
+        if (!live || !live.archived) return;
+        live.archived = false;
+        live.archivedAt = 0;
+        n++;
+      });
+      if (!n) return;
+      saveChats(); renderChatList();
+      toast('已把 ' + n + ' 条会话放回列表');
+    },
     onExport: (c) => {
       // 右键/「⋯」菜单里的「导出 Markdown」:与「设置 → 数据」的当前对话导出同一份 chatToMarkdown
       const msgs = (c.messages || []).filter((m) => m && String(m.content || '').trim() && !m.error);
@@ -1649,7 +1664,13 @@ async function rewriteCodeBlock(req) {
     + ' code exactly as the user asks. Reply with the COMPLETE updated code in one ```' + lang
     + ' block and nothing else: no explanations, no diffs, no notes about what changed.';
   const user = 'Instruction:\n' + String(req.prompt || '') + '\n\nCurrent code:\n```' + lang + '\n'
-    + window.OCPreview.closeFences(req.code) + '\n```';
+    + window.OCPreview.closeFences(req.code) + '\n```'
+    // 迭代链:最近几轮已应用的指令随请求带上。模型不知道「刚才的深色」是什么,
+    // 增量说法就落空;明确告知「当前代码已包含这些改动」,避免它从头重做
+    + (Array.isArray(req.prev) && req.prev.length
+      ? '\n\nInstructions already applied in earlier rounds (oldest first; the current code ALREADY reflects them — build on top, do not undo them):\n'
+        + req.prev.map((p, i) => (i + 1) + '. ' + p).join('\n')
+      : '');
   const format = providerFormat();
   const body = { model: state.currentModel, stream: false, _purpose: 'rewrite' };
   if (state.currentProviderId) body.providerId = state.currentProviderId;
@@ -1819,7 +1840,19 @@ function renderChatToc() {
   head.textContent = '本轮目录';
   const track = document.createElement('div');
   track.className = 'chat-toc-track';
-  track.setAttribute('aria-hidden', 'true');
+  track.title = '点击跳到对应位置';
+  track.setAttribute('role', 'slider');
+  // 轨道不只是进度显示:点哪一段就跳到内容的对应比例处。
+  // 之前只随滚动移动、点不动,长会话想回看中间某段还得自己滚。
+  track.addEventListener('click', (e) => {
+    const area = document.getElementById('chat-area');
+    if (!area || area.scrollHeight <= area.clientHeight) return;
+    const rect = track.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / Math.max(1, rect.height)));
+    // chat-area 的 scroll-behavior 是 smooth,直接赋值会变成一段追赶动画;
+    // 点击跳段要即时落地,instant 覆盖 CSS 的 smooth
+    area.scrollTo({ top: ratio * (area.scrollHeight - area.clientHeight), behavior: 'instant' });
+  });
   toc.appendChild(track);
   toc.appendChild(head);
   rounds.forEach((r, i) => {

@@ -2495,6 +2495,17 @@ if printf '%s' "$out_bad" | grep -q 'REWRITTEN'; then bad "没有新代码时不
 rwchats=$(curl -s "$BASE/api/sync/chats" -H "$RWAUTH" | grep -c 'Current code' || true)
 if [ "${rwchats:-0}" -eq 0 ]; then ok "改写请求不写进会话历史"; else bad "改写请求写进了会话历史"; fi
 if [ -n "$RWPROV" ]; then curl -s -X DELETE "$BASE/api/providers/$RWPROV" -H "$AUTH" > /dev/null; fi
+# anthropic 格式的改写:此前四种上游格式只覆盖了 chat —— mock 新增 /v1/messages,
+# 这里用 anthropic 形状的 body(system + messages + max_tokens)走一遍完整链路
+curl -s -X POST "$BASE/api/providers" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"name":"MockAnt","baseUrl":"http://127.0.0.1:'"$MOCK_PORT"'/v1","apiKey":"sk-ant-1","apiFormat":"anthropic","scope":"global","models":[{"id":"mock-rewrite"}]}' > /dev/null
+ANTPROV=$(curl -s "$BASE/api/providers" -H "$AUTH" | grep -o '"id":"[a-f0-9]*","name":"MockAnt"' | cut -d'"' -f4)
+[ -n "$ANTPROV" ] && ok "创建 anthropic 改写供应商" || bad "创建 anthropic 改写供应商"
+printf '{"providerId":"%s","model":"mock-rewrite","stream":false,"max_tokens":2048,"system":"You are a precise front-end code editor. Rewrite the given html code exactly as the user asks.","messages":[{"role":"user","content":"Instruction:\\nREWRITTEN-ANT please\\n\\nCurrent code:\\n```html\\n<!doctype html><html><body><h1>old</h1></body></html>\\n```"}]}' "$ANTPROV" > "$TMP/antrewrite.json"
+antout=$(curl -s -X POST "$BASE/api/proxy/anthropic" -H "$RWAUTH" -H "Content-Type: application/json" --data-binary @"$TMP/antrewrite.json")
+assert_contains "anthropic 格式改写走通" "$antout" 'REWRITTEN-ANT'
+assert_contains "anthropic 改写响应是 Anthropic 形状" "$antout" '"type":"message"'
+if [ -n "$ANTPROV" ]; then curl -s -X DELETE "$BASE/api/providers/$ANTPROV" -H "$AUTH" > /dev/null; fi
 
 say ""
 say "结果: $PASS 通过, $FAIL 失败"

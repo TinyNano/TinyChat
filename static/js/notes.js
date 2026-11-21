@@ -140,6 +140,8 @@
     };
   }
   function persistLocal() {
+    // 反向链接索引跟着 doc 走:任何落盘点都让它失效,下次用时重建
+    blIndex = null;
     const payload = { doc: N.doc, revision: N.revision, shares: N.shares };
     // OCStore 在写不进去时自己会提示一次(「本地存储已满」),这里只管换更小的副本
     if (window.OCStore.set(lsDocKey(), JSON.stringify(payload))) return;
@@ -156,6 +158,7 @@
       const j = JSON.parse(raw);
       if (!j || !j.doc || !Array.isArray(j.doc.notes)) return false;
       N.doc = { folders: j.doc.folders || [], notes: j.doc.notes || [], tombs: j.doc.tombs || {} };
+      blIndex = null;
       // 本地瘦身副本(正文为空)不能当作有效内容:只保留结构,等云端拉回正文
       if (j._slim) N._localSlim = true;
       N.revision = Number(j.revision) || 0;
@@ -222,6 +225,7 @@
         toast('检测到其他设备的改动，已自动合并（较新的版本保留）');
         const remote = (data && data.doc) || { folders: [], notes: [], tombs: {} };
         N.doc = mergeDocs(N.doc, remote);
+        blIndex = null;
         N.revision = Number(data && data.revision) || N.revision;
         if (Array.isArray(data && data.shares)) N.shares = data.shares;
         ensureUncat();
@@ -260,6 +264,7 @@
       };
       N.revision = Number(data.revision) || 0;
       N.shares = Array.isArray(data.shares) ? data.shares : [];
+      blIndex = null;   // 整份 doc 换新(merge 或首次拉取)
       ensureUncat();
       persistLocal();
       if (N.ready) renderAll();
@@ -428,6 +433,7 @@
       N._localLoaded = false;
       resolvedWarm = false;
       N.doc = { folders: [], notes: [], tombs: {} };
+      blIndex = null;
       N.revision = 0;
       N.shares = [];
     }
@@ -3069,6 +3075,29 @@
   // 下的第一篇笔记 —— 这样「[[项目记录]]」在还没建这篇笔记时也能点进文件夹看看。
   // 反向链接面板枚举「哪些笔记的正文里出现了指向当前笔记的 [[标题]]」。
   const LINK_RE = /\[\[([^\[\]]{1,200})\]\]/g;
+
+  // 反向链接索引:目标标题(小写) -> 引用它的笔记 id 集合。
+  // backlinksOf 在每次笔记渲染/编辑时都要用,旧实现对全部笔记逐篇跑正则,
+  // 几百篇时会明显卡。doc 的任何变更点(persistLocal / doc 整体换新)使索引失效,
+  // 下次用时 O(n) 重建一次,之后渲染是 O(命中数)。
+  let blIndex = null;
+  function blIndexGet() {
+    if (blIndex) return blIndex;
+    const map = {};
+    const re = new RegExp(LINK_RE.source, 'g');   // LINK_RE 自带 /g,exec 有状态,这里用副本
+    (N.doc.notes || []).forEach((n) => {
+      if (!n) return;
+      const content = String(n.content || '');
+      let m;
+      while ((m = re.exec(content))) {
+        const t = String(m[1] || '').split('|')[0].trim().toLowerCase();
+        if (!t) continue;
+        (map[t] = map[t] || new Set()).add(n.id);
+      }
+    });
+    blIndex = map;
+    return map;
+  }
   function resolveLinkTarget(raw) {
     const title = String(raw || '').split('|')[0].trim();
     if (!title) return null;
@@ -3098,22 +3127,20 @@
     const self = String(note.title || '').trim().toLowerCase();
     const inbound = [];
     const outbound = [];
-    const seenOut = {};
-    N.doc.notes.forEach((n) => {
-      if (!n || n.id === note.id) return;
-      const content = String(n.content || '');
-      let hit = false;
-      content.replace(LINK_RE, (m, inner) => {
-        const t = String(inner).split('|')[0].trim().toLowerCase();
-        if (self && t === self) hit = true;
-        return m;
-      });
-      if (hit) {
+    // 入链走索引(标题 -> 引用者集合),只有命中的那几篇才回头找片段位置;
+    // 出链仍只扫当前笔记正文(长度是本篇的,不是全库的)
+    if (self) {
+      const idx = blIndexGet();
+      (idx[self] ? Array.from(idx[self]) : []).forEach((id) => {
+        const n = noteById(id);
+        if (!n || n.id === note.id) return;
+        const content = String(n.content || '');
         // 取片段时用小写正文找位置,回原正文取(原文大小写可能与标题不一致)
-        const idx = content.toLowerCase().indexOf('[[' + self);
-        inbound.push({ note: n, excerpt: idx >= 0 ? content.slice(Math.max(0, idx - 40), idx + 120).replace(/\s+/g, ' ') : '' });
-      }
-    });
+        const pos = content.toLowerCase().indexOf('[[' + self);
+        inbound.push({ note: n, excerpt: pos >= 0 ? content.slice(Math.max(0, pos - 40), pos + 120).replace(/\s+/g, ' ') : '' });
+      });
+    }
+    const seenOut = {};
     String(note.content || '').replace(LINK_RE, (m, inner) => {
       const label = String(inner).split('|')[0].trim();
       if (!label || seenOut[label.toLowerCase()]) return m;

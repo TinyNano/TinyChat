@@ -55,9 +55,14 @@
     const pinMark = c.pinned
       ? '<span class="chat-pin-mark" data-tip="已置顶" aria-label="已置顶">' + (window.OC && OC.icon ? OC.icon('pinMark', 12) : I.pin) + '</span>'
       : '';
+    // 草稿指示:这条会话有没发出去的输入时亮一个点 —— 草稿随会话存了,
+    // 但找回来要挨个点开试,侧栏上先给个信号
+    const draftMark = (c.draft && String(c.draft.text || '').trim())
+      ? '<span class="chat-draft-dot" data-tip="有未发送的草稿" aria-label="有未发送的草稿"></span>'
+      : '';
     return '<span class="chat-icon">' + logo + '</span>'
       + '<span class="chat-title">' + escapeHtml(c.title || '新对话') + '</span>'
-      + pinMark;
+      + pinMark + draftMark;
   };
   const MENU_HTML = '<button class="menu-btn more-btn" data-act="more" data-tip="更多操作" aria-label="更多操作">' + ic('more', 16) + '</button>';
 
@@ -334,7 +339,23 @@
           try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(collapsedMap)); } catch (e) {}
           if (window.OCSettingsSync) window.OCSettingsSync.touchUi('chatGroupCollapsed');
         };
-        title.addEventListener('click', toggle);
+        // 归档组的「全部取消归档」:整理完旧对话后一个个点开反悔太笨。
+        // 按钮嵌在分组标题里,点击要先拦下(标题自身的 click 是折叠开关)
+        if (isArchived) {
+          const unarch = document.createElement('span');
+          unarch.className = 'chat-group-unarch';
+          unarch.setAttribute('data-tip', '把这一组全部放回时间分组');
+          unarch.textContent = '全部取消归档';
+          title.appendChild(unarch);
+        }
+        title.addEventListener('click', (e) => {
+          if (e.target.closest('.chat-group-unarch')) {
+            e.stopPropagation();
+            if (opts.onUnarchiveAll) opts.onUnarchiveAll(list);
+            return;
+          }
+          toggle();
+        });
         title.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
         section.appendChild(title);
         listEl.appendChild(section);
