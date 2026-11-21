@@ -656,6 +656,46 @@ const multi = await (async () => {
 // 前面的段落已把修订栈撤空,这轮从原版起步:改写 → 撤销 → 再改写,正是当初闭包失联的场景
 check('撤销后再次改写生效', multi.after2.code.indexOf('REWRITTEN2') >= 0 && /修订 v2/.test(multi.after2.ver), JSON.stringify(multi.after2).slice(0, 120));
 check('再次撤销回到原版', multi.back1.code === origCode && multi.back1.ver === '', JSON.stringify(multi.back1).slice(0, 120));
+
+// 5) 同屏两个块(HTML + SVG)各自改写:修订必须互不串线 —— 已移除的 carryHistory
+//    按「第一个已断连节点」取回,这个场景下会把 HTML 块的修订安到 SVG 块上。
+const indep = await (async () => {
+  const askBlock = async (nth, text) => {
+    await page.evaluate((n) => {
+      const block = document.querySelectorAll('.msg.assistant .code-block')[n];
+      if (block.querySelector('.code-prev-panel').classList.contains('hidden')) {
+        block.querySelector('.code-prev-toggle').click();
+      }
+      if (block.querySelector('.cpp-ask').classList.contains('hidden')) {
+        block.querySelector('[data-act="ask-ai"]').click();
+      }
+    }, nth);
+    await sleep(200);
+    // 填写与提交都在页内按索引定位:.code-block 与其它 div 交错,css nth-of-type 数不出来
+    await page.evaluate((a) => {
+      const block = document.querySelectorAll('.msg.assistant .code-block')[a.n];
+      const input = block.querySelector('.cpp-ask-input');
+      input.value = a.t;
+      block.querySelector('.cpp-ask').requestSubmit();
+    }, { n: nth, t: text });
+    await sleep(1600);
+  };
+  const codes = () => page.evaluate(() => Array.from(document.querySelectorAll('.msg.assistant .code-block'))
+    .map((b) => ({ code: b.querySelector('pre code').textContent, ver: b.querySelector('.cpp-ver').textContent })));
+  await askBlock(0, '换个标题');
+  await askBlock(1, '[svg] 换个颜色');
+  const both = await codes();
+  await page.evaluate(() => document.querySelectorAll('.msg.assistant .code-block')[1].querySelector('[data-act="undo-ai"]').click());
+  await sleep(300);
+  const afterUndoSvg = await codes();
+  return { both, afterUndoSvg };
+})();
+check('HTML 块改写不影响 SVG 块', indep.both[0].code.indexOf('REWRITTEN') >= 0 && indep.both[0].ver !== '' && indep.both[1].code.indexOf('REWRITTEN-SVG') >= 0 && indep.both[1].ver !== '', JSON.stringify(indep.both));
+check('SVG 块独立回退,HTML 块修订保持', indep.afterUndoSvg[1].code.indexOf('REWRITTEN-SVG') < 0 && indep.afterUndoSvg[1].ver === '' && indep.afterUndoSvg[0].code.indexOf('REWRITTEN') >= 0 && indep.afterUndoSvg[0].ver !== '', JSON.stringify(indep.afterUndoSvg));
+// 恢复原状,免得影响后续断言
+await page.evaluate(() => document.querySelectorAll('.msg.assistant .code-block')[0].querySelector('[data-act="undo-ai"]').click());
+await sleep(300);
+
 // 预览页里的样例脚本会尝试读 localStorage:被沙箱挡住是预期结果(这正是隔离在起作用),
 // 浏览器把它记成 pageerror。只排除这一条,其它异常仍然算失败。
 const realErrors = pageErrors.filter((e) => e.indexOf("The document is sandboxed and lacks the 'allow-same-origin' flag") < 0);

@@ -365,6 +365,9 @@ if ($toolModel === 'mock-rewrite') {
     } elseif (strpos($prompt, '[v2]') !== false) {
         // 第二轮改写:内容必须与第一轮不同,否则前端「没有新代码」的判定会拦下
         $content = "```html\n<!doctype html>\n<html><body><h1 id=\"hello\">REWRITTEN2</h1></body></html>\n```";
+    } elseif (strpos($prompt, '[svg]') !== false) {
+        // SVG 块的改写:返回 svg 围栏,extractCode 按「同语言优先」取到它
+        $content = "```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\"><rect width=\"80\" height=\"40\" fill=\"#ff3b30\"/><text x=\"6\" y=\"24\" fill=\"#fff\" font-size=\"10\">REWRITTEN-SVG</text></svg>\n```";
     } else {
         $content = "```html\n<!doctype html>\n<html><body><h1 id=\"hello\">REWRITTEN</h1></body></html>\n```";
     }

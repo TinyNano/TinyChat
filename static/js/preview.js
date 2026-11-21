@@ -186,12 +186,6 @@
     return h;
   }
   P.historyOf = historyOf;
-  P.applyRevision = function (block, code) {
-    if (!replaceCode(block, code)) return false;
-    const h = historyOf(block);
-    h.out = String(code);
-    return true;
-  };
 
   // 「有没有改动」用宽松口径:只差空白与行尾时也算没改(模型常把整段重新缩进一遍)
   function coarseChanged(a, b) {
